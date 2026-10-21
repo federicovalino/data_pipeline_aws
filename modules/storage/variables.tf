@@ -19,3 +19,8 @@ variable "allowed_vpce_id" {
   type        = string
   default     = null
 }
+variable "vpce_exempt_principal_arns" {
+  description = "ARNs de roles de servicios administrados (ej. Firehose) que pueden escribir objetos desde fuera de la VPC."
+  type        = list(string)
+  default     = []
+}

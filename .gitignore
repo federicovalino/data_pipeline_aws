@@ -35,3 +35,7 @@ tfplan
 terraform.rc
 
 # NO ignorar .terraform.lock.hcl: fija versiones de providers para todo el equipo
+
+# Python
+__pycache__/
+*.pyc

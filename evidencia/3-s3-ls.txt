@@ -1,0 +1,4 @@
+﻿2026-10-20 22:50:41       1791 raw/ingesta/year=2026/month=10/day=21/hour=01/dataplatform-dev-firehose-1-2026-10-21-01-49-40-3d57ebbb-1f50-4a54-9f6c-620f576ea3ac.gz
+2026-10-20 22:51:20       1692 raw/ingesta/year=2026/month=10/day=21/hour=01/dataplatform-dev-firehose-1-2026-10-21-01-50-19-266d113e-d94b-45ab-828f-30b8feb69284.gz
+2026-10-20 22:56:06       2045 raw/ingesta/year=2026/month=10/day=21/hour=01/dataplatform-dev-firehose-1-2026-10-21-01-55-00-7836d636-2b04-4c28-b6a9-c63751489fc5.gz
+2026-10-20 22:56:26       1403 raw/ingesta/year=2026/month=10/day=21/hour=01/dataplatform-dev-firehose-1-2026-10-21-01-55-24-7f984928-5ca6-4d6a-b648-24fe92a69cb4.gz
