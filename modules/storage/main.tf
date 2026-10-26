@@ -56,13 +56,24 @@ locals {
   # Opcional: los DATOS (objetos) solo se leen/escriben desde la VPC.
   # Se restringe solo el data plane, así Terraform puede seguir
   # gestionando la configuración del bucket desde fuera de la VPC.
+  #
+  # Excepción explícita: servicios administrados que escriben desde fuera de
+  # la VPC (ej. Kinesis Firehose) se listan en vpce_exempt_principal_arns.
+  # Las condiciones de un Deny se combinan con AND: se deniega solo si el
+  # acceso NO viene por el endpoint Y el principal NO está exceptuado.
+  vpce_condition   = { StringNotEquals = { "aws:SourceVpce" = var.allowed_vpce_id } }
+  exempt_condition = {
+    for k, v in { ArnNotLike = { "aws:PrincipalArn" = var.vpce_exempt_principal_arns } } :
+    k => v if length(var.vpce_exempt_principal_arns) > 0
+  }
+
   deny_outside_vpce = {
     Sid       = "DenyObjectAccessOutsideVpce"
     Effect    = "Deny"
     Principal = "*"
     Action    = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
     Resource  = "${aws_s3_bucket.data_lake.arn}/*"
-    Condition = { StringNotEquals = { "aws:SourceVpce" = var.allowed_vpce_id } }
+    Condition = merge(local.vpce_condition, local.exempt_condition)
   }
 
   policy_statements = concat(

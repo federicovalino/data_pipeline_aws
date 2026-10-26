@@ -1,0 +1,5 @@
+﻿Stream: dataplatform-dev-stream
+Enviados: 100 / 100  (fallidos: 0)
+Distribuci¾n por shard:
+  shardId-000000000000:   40 registros  ####################
+  shardId-000000000001:   60 registros  ##############################
