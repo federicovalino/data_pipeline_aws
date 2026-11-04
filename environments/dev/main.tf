@@ -57,3 +57,29 @@ module "kinesis" {
   buffer_size_mb          = 5
   buffer_interval_seconds = 60
 }
+
+module "flink" {
+  source = "../../modules/flink"
+
+  name_prefix        = local.name_prefix
+  stream_name        = module.kinesis.stream_name # ← outputs del módulo kinesis (pre-entrega 2)
+  stream_arn         = module.kinesis.stream_arn
+  stream_kms_key_arn = module.kinesis.kms_key_arn
+  jar_path           = "${path.root}/../../flink-app/target/clickstream-processor-1.0.jar"
+
+  # Capacidad: 1 subtask de lectura por shard → paralelismo = shards del stream (2)
+  parallelism         = module.kinesis.shard_count
+  parallelism_per_kpu = 1
+
+  checkpoint_interval_ms = 60000
+
+  # Estrategia temporal (Event Time)
+  window_minutes                     = 1
+  watermark_out_of_orderness_seconds = 10
+  watermark_idleness_seconds         = 60
+  allowed_lateness_seconds           = 30
+
+  # La app se crea DETENIDA: MSF solo cobra KPUs mientras corre. Se arranca a mano
+  # (aws kinesisanalyticsv2 start-application) una vez verificada la infraestructura.
+  start_application = false
+}

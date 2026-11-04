@@ -46,3 +46,18 @@ output "bronze_s3_prefix" {
   description = "Prefijo de S3 donde Firehose entrega los datos crudos."
   value       = module.kinesis.bronze_s3_prefix
 }
+
+output "flink_application_name" {
+  description = "Aplicación de Managed Service for Apache Flink."
+  value       = module.flink.application_name
+}
+
+output "flink_log_group" {
+  description = "Log group con USER_ACTIVITY, CART_ABANDONMENT_ALERT y LATE_EVENT."
+  value       = module.flink.log_group_name
+}
+
+output "flink_kpus" {
+  description = "KPUs de procesamiento del job (+1 de orquestación)."
+  value       = module.flink.kpus
+}
