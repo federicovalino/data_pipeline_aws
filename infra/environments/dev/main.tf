@@ -48,7 +48,7 @@ module "kinesis" {
   source = "../../modules/kinesis"
 
   name_prefix               = local.name_prefix
-  expected_write_mb_per_sec = 2 # throughput hipotético → 2 shards
+  expected_write_mb_per_sec = 2                         # throughput hipotético → 2 shards
   data_lake_bucket_arn      = module.storage.bucket_arn # ← output de storage
   bronze_prefix             = module.storage.data_prefix
   firehose_role_name        = local.firehose_role_name
