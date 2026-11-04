@@ -58,6 +58,14 @@ module "kinesis" {
   buffer_interval_seconds = 60
 }
 
+module "lakehouse" {
+  source = "../../modules/lakehouse"
+
+  name_prefix   = local.name_prefix
+  database_name = "lakehouse_db"
+  table_name    = "user_activity"
+}
+
 module "flink" {
   source = "../../modules/flink"
 
@@ -65,7 +73,7 @@ module "flink" {
   stream_name        = module.kinesis.stream_name # ← outputs del módulo kinesis (pre-entrega 2)
   stream_arn         = module.kinesis.stream_arn
   stream_kms_key_arn = module.kinesis.kms_key_arn
-  jar_path           = "${path.root}/../../flink-app/target/clickstream-processor-1.0.jar"
+  jar_path           = "${path.root}/../../../app/target/clickstream-processor-1.0.jar"
 
   # Capacidad: 1 subtask de lectura por shard → paralelismo = shards del stream (2)
   parallelism         = module.kinesis.shard_count
@@ -78,6 +86,12 @@ module "flink" {
   watermark_out_of_orderness_seconds = 10
   watermark_idleness_seconds         = 60
   allowed_lateness_seconds           = 30
+
+  # Lakehouse: la app escribe en la tabla Iceberg registrada en Glue
+  iceberg_warehouse      = module.lakehouse.warehouse_path # ← outputs del módulo lakehouse
+  iceberg_database       = module.lakehouse.database_name
+  iceberg_table          = module.lakehouse.table_name
+  additional_policy_arns = [module.lakehouse.writer_policy_arn]
 
   # La app se crea DETENIDA: MSF solo cobra KPUs mientras corre. Se arranca a mano
   # (aws kinesisanalyticsv2 start-application) una vez verificada la infraestructura.

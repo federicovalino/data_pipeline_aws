@@ -61,3 +61,23 @@ output "flink_kpus" {
   description = "KPUs de procesamiento del job (+1 de orquestación)."
   value       = module.flink.kpus
 }
+
+output "lakehouse_bucket" {
+  description = "Bucket del Lakehouse (datos y metadata Iceberg)."
+  value       = module.lakehouse.bucket_name
+}
+
+output "lakehouse_warehouse" {
+  description = "Warehouse de Iceberg."
+  value       = module.lakehouse.warehouse_path
+}
+
+output "lakehouse_database" {
+  description = "Base de datos del Glue Data Catalog."
+  value       = module.lakehouse.database_name
+}
+
+output "athena_workgroup" {
+  description = "Workgroup de Athena para consultar las tablas Iceberg."
+  value       = module.lakehouse.athena_workgroup
+}

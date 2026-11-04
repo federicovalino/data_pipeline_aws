@@ -41,4 +41,4 @@ __pycache__/
 *.pyc
 
 # Build de la aplicación Flink
-flink-app/target/
+app/target/

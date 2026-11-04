@@ -108,3 +108,25 @@ variable "vpc_config" {
   })
   default = null
 }
+
+# --- Lakehouse (pre-entrega 5) -------------------------------------------------
+variable "iceberg_warehouse" {
+  description = "Warehouse de Iceberg (s3://bucket/warehouse). Output del módulo lakehouse."
+  type        = string
+}
+
+variable "iceberg_database" {
+  description = "Base de datos del Glue Data Catalog donde vive la tabla Iceberg."
+  type        = string
+}
+
+variable "iceberg_table" {
+  description = "Tabla Iceberg de salida."
+  type        = string
+}
+
+variable "additional_policy_arns" {
+  description = "Políticas IAM extra para el rol de ejecución (ej. lakehouse-writer)."
+  type        = list(string)
+  default     = []
+}

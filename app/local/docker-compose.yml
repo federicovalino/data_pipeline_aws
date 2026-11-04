@@ -2,8 +2,9 @@
 # Clúster Flink 1.19 local (misma versión que el runtime FLINK-1_19 de MSF) para
 # ejecutar el MISMO .jar contra el Kinesis Data Stream real de AWS.
 #
-#   docker compose -f flink-app/local/docker-compose.yml up -d
-#   docker compose -f flink-app/local/docker-compose.yml exec jobmanager \
+#   $env:ICEBERG_WAREHOUSE = terraform -chdir=infra/environments/dev output -raw lakehouse_warehouse
+#   docker compose -f app/local/docker-compose.yml up -d
+#   docker compose -f app/local/docker-compose.yml exec jobmanager \
 #       flink run -d -p 2 /job/clickstream-processor-1.0.jar
 #   Flink Dashboard: http://localhost:8081
 #
@@ -19,6 +20,10 @@ x-flink-common: &flink-common
     AWS_SHARED_CREDENTIALS_FILE: /opt/flink/.aws/credentials
     AWS_CREDENTIAL_PROFILES_FILE: /opt/flink/.aws/credentials
     AWS_CONFIG_FILE: /opt/flink/.aws/config
+    # Lakehouse (pre-entrega 5): warehouse de Iceberg, tomado del output de Terraform
+    ICEBERG_WAREHOUSE: ${ICEBERG_WAREHOUSE:-}
+    ICEBERG_DATABASE: lakehouse_db
+    ICEBERG_TABLE: user_activity
     FLINK_PROPERTIES: |
       jobmanager.rpc.address: jobmanager
       taskmanager.numberOfTaskSlots: 2
