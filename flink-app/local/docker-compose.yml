@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# Clúster Flink 1.19 local (misma versión que el runtime FLINK-1_19 de MSF) para
+# ejecutar el MISMO .jar contra el Kinesis Data Stream real de AWS.
+#
+#   docker compose -f flink-app/local/docker-compose.yml up -d
+#   docker compose -f flink-app/local/docker-compose.yml exec jobmanager \
+#       flink run -d -p 2 /job/clickstream-processor-1.0.jar
+#   Flink Dashboard: http://localhost:8081
+#
+# Credenciales: se monta ~/.aws en modo solo lectura (no hay claves en este archivo).
+# ---------------------------------------------------------------------------
+x-flink-common: &flink-common
+  image: flink:1.19.1-java11
+  volumes:
+    - ../target:/job:ro
+    - ${USERPROFILE:-~}/.aws:/opt/flink/.aws:ro
+  environment: &flink-env
+    AWS_REGION: us-east-1
+    AWS_SHARED_CREDENTIALS_FILE: /opt/flink/.aws/credentials
+    AWS_CREDENTIAL_PROFILES_FILE: /opt/flink/.aws/credentials
+    AWS_CONFIG_FILE: /opt/flink/.aws/config
+    FLINK_PROPERTIES: |
+      jobmanager.rpc.address: jobmanager
+      taskmanager.numberOfTaskSlots: 2
+      parallelism.default: 2
+      execution.checkpointing.interval: 60s
+      execution.checkpointing.mode: EXACTLY_ONCE
+      state.backend.type: rocksdb
+      state.checkpoints.dir: file:///tmp/flink-checkpoints
+
+services:
+  jobmanager:
+    <<: *flink-common
+    container_name: flink-jobmanager
+    command: jobmanager
+    ports:
+      - "8081:8081"   # Flink Dashboard
+
+  taskmanager:
+    <<: *flink-common
+    container_name: flink-taskmanager
+    command: taskmanager
+    depends_on:
+      - jobmanager

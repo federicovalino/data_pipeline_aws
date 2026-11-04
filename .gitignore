@@ -39,3 +39,6 @@ terraform.rc
 # Python
 __pycache__/
 *.pyc
+
+# Build de la aplicación Flink
+flink-app/target/

@@ -11,6 +11,11 @@ Uso:
     pip install boto3
     python scripts/producer.py --stream-name dataplatform-dev-stream
     python scripts/producer.py --stream-name dataplatform-dev-stream --count 100 --users 50
+
+Modo continuo (pre-entrega 4, para alimentar las ventanas de Flink):
+    python scripts/producer.py --stream-name dataplatform-dev-stream --count 600 --users 20 --interval 0.5 --late-rate 0.05
+    --interval    segundos entre eventos (flujo continuo: las ventanas de 1 minuto se van cerrando)
+    --late-rate   fracción de eventos con event_ts atrasado 20-120 s (simula red móvil / reintentos)
 """
 
 import argparse
@@ -19,7 +24,7 @@ import random
 import time
 import uuid
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import boto3
 
@@ -28,14 +33,37 @@ PAGES = ["/", "/catalogo", "/producto/123", "/producto/456", "/carrito", "/check
 BATCH_SIZE = 500  # máximo de registros por llamada a PutRecords
 
 
-def build_event(user_id: str) -> dict:
+def build_event(user_id: str, late_rate: float = 0.0) -> dict:
+    event_time = datetime.now(timezone.utc)
+    if random.random() < late_rate:
+        # Evento "tardío": se generó antes pero llega ahora (red móvil, reintentos)
+        event_time -= timedelta(seconds=random.randint(20, 120))
     return {
         "event_id": str(uuid.uuid4()),
         "user_id": user_id,
         "event_type": random.choice(EVENT_TYPES),
         "page": random.choice(PAGES),
-        "event_ts": datetime.now(timezone.utc).isoformat(),
+        "event_ts": event_time.isoformat(),
     }
+
+
+def send_continuous(client, args, users) -> None:
+    """Un evento cada --interval segundos: flujo sostenido para las ventanas de Flink."""
+    shard_counter: Counter = Counter()
+    for i in range(args.count):
+        event = build_event(random.choice(users), args.late_rate)
+        response = client.put_record(
+            StreamName=args.stream_name,
+            Data=(json.dumps(event) + "\n").encode("utf-8"),
+            PartitionKey=event["user_id"],
+        )
+        shard_counter[response["ShardId"]] += 1
+        if (i + 1) % 20 == 0:
+            print(f"  {i + 1}/{args.count} enviados | último: {event['user_id']} {event['event_type']} {event['event_ts']}")
+        time.sleep(args.interval)
+    print(f"Stream: {args.stream_name} | enviados: {args.count}")
+    for shard_id, n in sorted(shard_counter.items()):
+        print(f"  {shard_id}: {n} registros")
 
 
 def main() -> None:
@@ -44,10 +72,18 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=100, help="cantidad de eventos")
     parser.add_argument("--users", type=int, default=50, help="cantidad de usuarios distintos")
     parser.add_argument("--region", default="us-east-1")
+    parser.add_argument("--interval", type=float, default=0.0,
+                        help="segundos entre eventos (0 = envío en lote, como en la pre-entrega 2)")
+    parser.add_argument("--late-rate", type=float, default=0.0,
+                        help="fracción de eventos con event_ts atrasado (para probar watermarks)")
     args = parser.parse_args()
 
     client = boto3.client("kinesis", region_name=args.region)
     users = [f"user-{i:04d}" for i in range(args.users)]
+
+    if args.interval > 0:
+        send_continuous(client, args, users)
+        return
 
     records = []
     for _ in range(args.count):

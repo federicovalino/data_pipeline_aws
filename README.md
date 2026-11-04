@@ -6,6 +6,7 @@ Plataforma de datos en AWS gestionada 100% con Terraform. Se construye por etapa
 |---|---|---|
 | Pre-entrega 1 | Backend remoto con locking, VPC de datos privada con acceso a S3 por la red interna de AWS, bucket de Data Lake y roles IAM | [Infraestructura base](#arquitectura) |
 | Pre-entrega 2 | Ingesta real-time: Kinesis Data Stream (provisioned, KMS), Firehose hacia la capa Bronze del Data Lake, producer simulado y alarmas | [Ingesta real-time](#pre-entrega-2--ingesta-real-time-sobre-el-entorno-base) |
+| Pre-entrega 4 | Procesamiento en tiempo real: aplicación de Managed Service for Apache Flink con Event Time, watermarks, ventanas de 1 minuto, Keyed State y checkpointing, desplegada con Terraform | [Procesamiento en tiempo real](#pre-entrega-4--procesamiento-en-tiempo-real-con-managed-service-for-apache-flink) |
 
 ## Arquitectura
 
@@ -54,7 +55,8 @@ network.vpc_id, private_subnet_ids, identity.*_role_arn ──► outputs del en
 │   ├── network/               # VPC, subredes privadas, tabla de rutas, S3 Gateway Endpoint
 │   ├── storage/               # Bucket del Data Lake con hardening
 │   ├── identity/              # Rol de ejecución y rol de auditoría
-│   └── kinesis/               # Pre-entrega 2: Kinesis Data Stream + Firehose → S3, IAM y alarmas
+│   ├── kinesis/               # Pre-entrega 2: Kinesis Data Stream + Firehose → S3, IAM y alarmas
+│   └── flink/                 # Pre-entrega 4: aplicación de Managed Service for Apache Flink, artefacto, IAM y logs
 ├── environments/
 │   └── dev/                   # Root module 2: invoca los módulos con los valores de dev
 │       ├── backend.tf         # backend "s3" {} (configuración parcial)
@@ -64,6 +66,7 @@ network.vpc_id, private_subnet_ids, identity.*_role_arn ──► outputs del en
 │       ├── terraform.tfvars   # valores de dev
 │       ├── outputs.tf
 │       └── backend.hcl.example
+├── flink-app/                 # Pre-entrega 4: código de la aplicación Flink (Java 11, Maven)
 ├── scripts/                   # producer simulado (Python/Boto3) y evento de prueba para la CLI
 ├── docs/                      # capturas de verificación
 ├── PLAN_OUTPUT.md
@@ -350,6 +353,238 @@ La llave KMS queda programada para eliminarse a los 7 días (mínimo que exige A
 
 ---
 
+
+## Pre-entrega 4 — Procesamiento en tiempo real con Managed Service for Apache Flink
+
+Se agrega la capa de **procesamiento stateful** sobre la ingesta de la pre-entrega 2. Una aplicación de **Amazon Managed Service for Apache Flink (MSF)** consume el mismo Kinesis Data Stream que Firehose y calcula, en tiempo real y por usuario, la actividad de cada minuto y el riesgo de **carrito abandonado**.
+
+### Arquitectura
+
+```
+ producer.py (--interval: flujo continuo)
+        │  PutRecord · PartitionKey = user_id
+        ▼
+ Kinesis Data Stream  dataplatform-dev-stream  (2 shards · KMS)          ← pre-entrega 2
+        ├──► Firehose ──► S3 raw/ingesta/ (Bronze)                          ← pre-entrega 2
+        │
+        └──► Managed Service for Apache Flink  dataplatform-dev-clickstream-flink   ← pre-entrega 4
+               runtime FLINK-1_19 · Parallelism 2 · ParallelismPerKPU 1 · 2 KPU (+1 orquestación)
+               ┌────────────────────────────────────────────────────────────────────────┐
+               │ ① kinesis-source         FlinkKinesisConsumer · 1 subtask por shard    │
+               │                          polling 1 GetRecords/s (convive con Firehose) │
+               │                          offsets por shard = Operator State           │
+               │ ② parse-validate         JSON → ClickEvent (descarta inválidos)        │
+               │ ③ event-time-watermarks  event_ts · 10 s de tolerancia · idleness 1 min │
+               │ ④ keyBy(user_id) → Tumbling 1 min (Event Time) · allowedLateness 30 s   │
+               │      AggregateFunction: contadores del minuto                         │
+               │      ProcessWindowFunction: Keyed State entre ventanas (TTL 30 min)    │
+               │ ⑤ sinks → CloudWatch Logs: USER_ACTIVITY · CART_ABANDONMENT_ALERT       │
+               │      Side Output (muy tardíos) → LATE_EVENT                           │
+               └────────────────────────────────────────────────────────────────────────┘
+               Checkpoints cada 60 s (RocksDB) y snapshots → S3 administrado por MSF
+        ▲
+        └── código: s3://dataplatform-dev-flink-artifacts-<account>/flink/clickstream-processor/…jar
+```
+
+### Lógica de negocio
+
+**Pregunta que responde:** ¿qué hace cada usuario minuto a minuto, y quién está acumulando productos en el carrito sin comprar?
+
+| Paso | Qué hace | Por qué |
+|---|---|---|
+| **Event Time** | Usa `event_ts`, el momento en que el producer generó el evento | Determinista: el lag de Kinesis o un reproceso no cambian en qué minuto cae cada evento |
+| **Watermark** | `forBoundedOutOfOrderness(10 s)` + `withIdleness(1 min)` | 10 s cubren red móvil, reintentos y la mezcla de 2 shards. Idleness evita que un shard sin tráfico congele las ventanas |
+| **Ventana** | `TumblingEventTimeWindows` de 1 minuto por `user_id` | Cuenta `page_view`, `click`, `add_to_cart` y `checkout` de cada usuario en cada minuto |
+| **Agregación incremental** | `AggregateFunction` (`EventCounts`) | Flink guarda solo 5 contadores por usuario y ventana, no todos los eventos |
+| **Keyed State** | `pending-cart-items` en `context.globalState()` (por usuario, **entre ventanas**) | `add_to_cart` suma y `checkout` lo resetea a 0. Al llegar a 3 productos pendientes, se emite **una** alerta `CART_ABANDONMENT_ALERT` (cuando el usuario cruza el umbral) |
+| **TTL del estado** | 30 minutos sin actividad | Un usuario inactivo libera su estado: el estado no crece indefinidamente |
+| **Tardíos** | `allowedLateness(30 s)` + `sideOutputLateData` | Un tardío moderado re-emite la ventana corregida. Uno muy tardío va a `LATE_EVENT`: no se pierde en silencio |
+| **Idempotencia** | `context.windowState()` guarda cuántos `add_to_cart` de la ventana ya se aplicaron | Si la ventana se re-emite por un tardío, el carrito pendiente suma **solo la diferencia** y no cuenta dos veces |
+
+Salida (una línea JSON por usuario y minuto, fácil de consultar en CloudWatch Logs Insights):
+
+```json
+USER_ACTIVITY {"user_id":"user-0007","window_start":"2026-11-04T14:05:00Z","window_end":"2026-11-04T14:06:00Z","total_events":4,"page_views":1,"clicks":0,"add_to_cart":3,"checkouts":0,"pending_cart_items":3,"abandonment_risk":true,"alert_triggered":true}
+```
+
+### Código de la aplicación (`flink-app/`)
+
+```
+flink-app/
+├── pom.xml                                   # Flink 1.19.1 (provided) + conector Kinesis (compile) → uber-jar
+└── src/main/java/com/dataplatform/flink/
+    ├── ClickstreamProcessingJob.java          # main: source, watermarks, ventana, sinks
+    ├── ClickEvent.java                        # evento de entrada (POJO) + parseo y validación
+    ├── EventCounts.java                       # AggregateFunction: contadores incrementales por ventana
+    ├── CartAbandonmentFunction.java           # ProcessWindowFunction con Keyed State + TTL
+    ├── UserActivity.java                      # resultado por usuario y ventana
+    └── LoggingSink.java                       # sink a los logs de la aplicación (CloudWatch)
+flink-app/local/docker-compose.yml             # clúster Flink 1.19 local para correr el mismo .jar contra Kinesis
+```
+
+**Empaquetado:** las librerías de Flink (`flink-streaming-java`, `flink-clients`) y el logging van como `provided`, porque las trae el runtime de MSF; incluirlas genera conflictos de classpath. Dentro del uber-jar (`maven-shade-plugin`) van solo el conector de Kinesis, `aws-kinesisanalytics-runtime` (para leer las propiedades definidas en Terraform) y Jackson.
+
+**Configuración sin valores en el código:** el stream, la región y los parámetros de tiempo (ventana, tolerancia, idleness, allowed lateness) llegan como propiedades de la aplicación (`FlinkApplicationProperties`), definidas en Terraform.
+
+### Infraestructura (`modules/flink/`)
+
+| Recurso | Configuración | Por qué |
+|---|---|---|
+| `aws_s3_bucket` (artefactos) | `dataplatform-dev-flink-artifacts-<account>`: versionado, SSE, sin acceso público, solo HTTPS | Separado del Data Lake: la política del Data Lake solo admite objetos vía VPC Endpoint y MSF descarga el código desde fuera de la VPC |
+| `aws_s3_object` | El `.jar` con `source_hash` | Si cambia el código, cambia la versión del objeto y Terraform actualiza la aplicación |
+| `aws_iam_role` + policy | Leer **solo** ese `.jar`, leer **solo** el stream, `kms:Decrypt` vía Kinesis, escribir **solo** en su log group y publicar métricas en `AWS/KinesisAnalytics` | Mínimo privilegio, igual que los roles de las pre-entregas anteriores |
+| `aws_cloudwatch_log_group` | `/aws/kinesis-analytics/dataplatform-dev-clickstream-flink`, 7 días | Resultados, alertas y eventos tardíos |
+| `aws_kinesisanalyticsv2_application` | Runtime `FLINK-1_19`, código en S3 (versión concreta), propiedades, checkpointing, monitoreo, paralelismo, snapshots y restauración | La aplicación completa definida como código |
+
+**Checkpointing (`checkpoint_configuration`):**
+
+- `checkpointing_enabled = true`, cada **60 s**, con 5 s de pausa mínima entre checkpoints.
+- El estado vive en RocksDB, en cada KPU, y los checkpoints se guardan en el **S3 administrado por el servicio**. En MSF esa ruta no se configura: la gestiona AWS, que es lo que garantiza la recuperación automática.
+- `snapshots_enabled = true`, `RESTORE_FROM_LATEST_SNAPSHOT` y `allow_non_restored_state = false`: un `terraform apply` que cambia el código o el paralelismo **conserva** las ventanas abiertas y los carritos pendientes. Si algún operador no puede recuperar su estado, la aplicación falla en lugar de descartarlo (todos los operadores tienen `uid` fijo).
+
+**Monitoreo (`monitoring_configuration`):** logs en nivel `INFO`, que es donde salen `USER_ACTIVITY`, las alertas y los tardíos, y métricas a nivel `TASK`: `millisBehindLatest`, `backPressuredTimeMsPerSecond`, `lastCheckpointDuration`.
+
+**Convivencia con Firehose (dos consumidores sobre el mismo stream):** Flink y Firehose leen el stream de forma independiente: cada uno lleva su propia posición por shard y ninguno "consume" los datos del otro. Lo que **sí** comparten en modo polling es el cupo de lectura de cada shard: **5 llamadas `GetRecords` por segundo y 2 MB/s**. Firehose hace 1 llamada por segundo por shard, pero el conector de Flink por defecto consulta cada 200 ms (5 por segundo). Juntos superarían el cupo y dispararían la alarma `ReadProvisionedThroughputExceeded` de la pre-entrega 2. Por eso el source se configura con **1 llamada por segundo** (`kinesis.getrecords.interval.ms = 1000`): en total 2 de 5 llamadas por shard, con margen. El costo es hasta ~1 s más de latencia de lectura, despreciable frente a ventanas de 1 minuto. En producción, con más consumidores o más volumen, se pasaría a **Enhanced Fan-Out**: cada consumidor tiene sus propios 2 MB/s por shard, a cambio de un costo por consumidor y por shard.
+
+**Conectividad:** la aplicación **no** se despliega dentro de la VPC (`vpc_config = null`). Su fuente (Kinesis), su código (S3) y sus logs (CloudWatch) son servicios administrados a los que MSF accede por sus endpoints de AWS, cifrados con TLS y autorizados por el rol de ejecución. Meterla en las subredes privadas de la pre-entrega 1, que no tienen NAT, obligaría a crear VPC endpoints de interfaz para `kinesis-streams`, `logs` y `monitoring`. El módulo lo deja preparado con la variable `vpc_config` para cuando el job necesite llegar a recursos privados (por ejemplo, una base de datos en la VPC).
+
+### Paralelismo y KPUs
+
+```
+Shards del stream                      2
+Parallelism                            2   = module.kinesis.shard_count (1 subtask de source por shard)
+ParallelismPerKPU                      1   cada subtask tiene su KPU completa para el estado RocksDB
+KPUs de procesamiento = 2 / 1 =        2   (1 KPU = 1 vCPU + 4 GB RAM + 50 GB de almacenamiento)
+KPU de orquestación                   +1   la agrega MSF por aplicación
+Total facturado                        3 KPU
+Auto scaling                           desactivado: escalado manual y predecible, siempre desde snapshot
+```
+
+El paralelismo se toma del output `shard_count` del módulo `kinesis`: si el stream crece (por ejemplo, de 2 a 4 shards), el job acompaña en el próximo `terraform apply`, y lo hace restaurando el estado desde el último snapshot.
+
+### Despliegue
+
+**1. Compilar la aplicación** (no requiere Java ni Maven instalados: usa Docker):
+
+```powershell
+docker run --rm -v "${PWD}/flink-app:/app" -w /app maven:3.9-eclipse-temurin-11 mvn -B -q package
+# genera flink-app/target/clickstream-processor-1.0.jar
+```
+
+**2. Subir el código y desplegar (la aplicación queda creada pero detenida):**
+
+```bash
+cd environments/dev
+terraform init -backend-config="backend.hcl"
+terraform validate
+terraform plan
+terraform apply        # sube el .jar a S3 y crea rol, logs y la aplicación (start_application = false)
+terraform output flink_application_name
+```
+
+**3. Arrancar el job** (recién acá empieza a facturar KPUs):
+
+```bash
+aws kinesisanalyticsv2 start-application --application-name dataplatform-dev-clickstream-flink \
+  --run-configuration '{"ApplicationRestoreConfiguration":{"ApplicationRestoreType":"SKIP_RESTORE_FROM_SNAPSHOT"}}'
+aws kinesisanalyticsv2 describe-application --application-name dataplatform-dev-clickstream-flink \
+  --query 'ApplicationDetail.ApplicationStatus'      # STARTING → RUNNING (2-3 minutos)
+```
+
+**4. Generar tráfico continuo** (con algunos eventos atrasados para ejercitar watermarks y tardíos):
+
+```bash
+python scripts/producer.py --stream-name dataplatform-dev-stream --count 600 --users 20 --interval 0.5 --late-rate 0.05
+```
+
+### Evidencia de ejecución
+
+#### Estado del despliegue en AWS
+
+`terraform apply` creó toda la infraestructura del checkpoint: el bucket de artefactos con el `.jar` subido, el rol de ejecución con su política, el log group, y la infraestructura de las pre-entregas 1 y 2. La creación del recurso `aws_kinesisanalyticsv2_application` fue rechazada por AWS **a nivel de cuenta**, no por la configuración:
+
+```
+Error: creating Kinesis Analytics v2 Application (dataplatform-dev-clickstream-flink):
+UnsupportedOperationException: Your account <ACCOUNT_ID> needs additional verification for
+creating or updating applications. Create a support case with the AWS Account Verification team
+for further assistance.
+```
+
+Es una restricción que AWS aplica a cuentas nuevas para Managed Service for Apache Flink. Se abrió un caso de soporte para habilitar el servicio. Una vez habilitado, alcanza con repetir `terraform apply`: el resto de la infraestructura ya existe y Terraform solo crea la aplicación.
+
+#### Ejecución del mismo job en un clúster Flink 1.19 contra el Kinesis real
+
+Mientras tanto, para validar el procesamiento de punta a punta, el **mismo `.jar`** se ejecutó en un clúster Flink **1.19.1** (la versión del runtime `FLINK-1_19` de MSF) levantado con Docker (`flink-app/local/docker-compose.yml`: JobManager y TaskManager con 2 slots, RocksDB y checkpoints cada 60 s). El job consumió el **Kinesis Data Stream real** de AWS (`dataplatform-dev-stream`, 2 shards, cifrado con KMS) con las credenciales del usuario IAM. Sin propiedades de MSF, el job usa sus valores por defecto: el mismo stream, región, ventana de 1 minuto, 10 s de tolerancia, 1 min de idleness y 30 s de *allowed lateness*.
+
+```powershell
+docker compose -f flink-app/local/docker-compose.yml up -d
+docker compose -f flink-app/local/docker-compose.yml exec jobmanager flink run -d -p 2 /job/clickstream-processor-1.0.jar
+python scripts/producer.py --stream-name dataplatform-dev-stream --count 600 --users 20 --interval 0.5 --late-rate 0.05
+```
+
+**1. Grafo del job en el Flink Dashboard** (`http://localhost:8081` → *Running Jobs* → `clickstream-user-activity`):
+
+![Grafo del job en el Flink Dashboard](docs/flink-job-graph.png)
+
+**2. Resultados del procesamiento** (logs del TaskManager, donde escribe `LoggingSink`):
+
+```powershell
+docker compose -f flink-app/local/docker-compose.yml logs taskmanager | Select-String "USER_ACTIVITY|CART_ABANDONMENT_ALERT|LATE_EVENT"
+```
+
+```
+TODO: pegar la salida (líneas USER_ACTIVITY, CART_ABANDONMENT_ALERT y LATE_EVENT)
+```
+
+![Resultados del job](docs/flink-results.png)
+
+En MSF, esas mismas líneas van a CloudWatch Logs (log group `/aws/kinesis-analytics/dataplatform-dev-clickstream-flink`) y se consultan con Logs Insights:
+
+```
+fields @timestamp, message
+| filter message like /USER_ACTIVITY|CART_ABANDONMENT_ALERT|LATE_EVENT/
+| sort @timestamp desc
+| limit 50
+```
+
+### Validación local de la lógica
+
+Antes del despliegue, las clases del pipeline (`EventCounts`, `CartAbandonmentFunction`, `LoggingSink`) se ejecutaron en un mini-clúster local de Flink 1.19.1 con una secuencia controlada de eventos: desordenados, tardíos y muy tardíos. Con ventanas de 1 minuto, 10 s de tolerancia y 30 s de *allowed lateness*, la salida fue:
+
+```
+llega user-a add_to_cart 10:00:05 · user-a add_to_cart 10:00:20 · user-b page_view 10:00:30
+llega user-a page_view 10:00:50 · user-b click 10:00:45 (desordenado) · user-a add_to_cart 10:01:05
+llega user-b page_view 10:01:12   → watermark 10:01:02 ≥ fin de ventana: dispara [10:00, 10:01)
+USER_ACTIVITY {"user_id":"user-a",...,"add_to_cart":2,"pending_cart_items":2,"abandonment_risk":false}
+USER_ACTIVITY {"user_id":"user-b",...,"page_views":1,"clicks":1,...}
+llega user-a add_to_cart 10:00:55 (tardío, dentro de allowedLateness) → la ventana se re-emite corregida
+USER_ACTIVITY {"user_id":"user-a",...,"add_to_cart":3,"pending_cart_items":3,"abandonment_risk":true}
+CART_ABANDONMENT_ALERT {"user_id":"user-a",...,"pending_cart_items":3,"alert_triggered":true}
+llega user-b checkout 10:01:40 · user-a click 10:00:10 (muy tardío: la ventana ya expiró)
+LATE_EVENT ClickEvent{user-a, click, 2026-11-04T10:00:10Z}
+llega user-a page_view 10:02:20   → dispara [10:01, 10:02)
+USER_ACTIVITY {"user_id":"user-a",...,"add_to_cart":1,"pending_cart_items":4,"abandonment_risk":true}
+USER_ACTIVITY {"user_id":"user-b",...,"checkouts":1,"pending_cart_items":0,...}
+```
+
+- **Desorden:** `user-b click 10:00:45` llegó después de `10:00:50` y entró igual en su ventana.
+- **Corrección por tardío:** el `add_to_cart 10:00:55` re-emitió la ventana. El carrito pendiente pasó de 2 a **3**, no a 5: la idempotencia evitó contar dos veces los dos productos anteriores.
+- **Alerta única:** se emitió al cruzar el umbral (3) y no se repitió en la ventana siguiente, aunque el riesgo siguiera activo.
+- **Side Output:** el `click 10:00:10` llegó cuando la ventana ya había expirado y salió por `LATE_EVENT`.
+- **Checkout:** el de `user-b` dejó su carrito pendiente en 0.
+
+### Costos y limpieza
+
+MSF se factura por KPU-hora mientras la aplicación corre: 3 KPU en este diseño. Para pruebas:
+
+```bash
+# Detener la aplicación sin destruir nada (toma un snapshot del estado)
+aws kinesisanalyticsv2 stop-application --application-name dataplatform-dev-clickstream-flink
+
+# Eliminar todo el entorno
+cd environments/dev
+terraform destroy
+```
 
 ## Cómo extender a prod
 
