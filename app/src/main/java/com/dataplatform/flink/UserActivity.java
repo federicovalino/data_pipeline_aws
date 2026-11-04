@@ -9,6 +9,8 @@ public class UserActivity {
     public String userId;
     public String windowStart;
     public String windowEnd;
+    public long windowStartMillis;   // para la tabla Iceberg (timestamp)
+    public long windowEndMillis;
     public long totalEvents;
     public long pageViews;
     public long clicks;

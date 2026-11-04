@@ -12,8 +12,15 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
 import org.apache.flink.streaming.connectors.kinesis.FlinkKinesisConsumer;
 import org.apache.flink.streaming.connectors.kinesis.config.ConsumerConfigConstants;
+import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
+import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.flink.CatalogLoader;
+import org.apache.iceberg.flink.FlinkSchemaUtil;
+import org.apache.iceberg.flink.TableLoader;
+import org.apache.iceberg.flink.sink.IcebergSink;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,6 +39,8 @@ import java.util.Properties;
  *          · ProcessWindowFunction: Keyed State entre ventanas (productos en carrito sin checkout)
  *     -> USER_ACTIVITY y CART_ABANDONMENT_ALERT a CloudWatch Logs
  *     -> eventos tardíos (después de allowedLateness) a un Side Output: LATE_EVENT
+ *     -> Lakehouse (pre-entrega 5): IcebergSink -> tabla lakehouse_db.user_activity
+ *        registrada en el AWS Glue Data Catalog (upsert por user_id + window_start)
  *
  * Parámetros: grupo "FlinkApplicationProperties" definido en Terraform (modules/flink).
  * Checkpointing: en MSF lo configura Terraform (checkpoint_configuration); los checkpoints
@@ -53,6 +62,13 @@ public class ClickstreamProcessingJob {
         final int idlenessSeconds    = Integer.parseInt(props.getProperty("watermark.idleness.seconds", "60"));
         final int allowedLatenessSec = Integer.parseInt(props.getProperty("allowed.lateness.seconds", "30"));
         final String getRecordsIntervalMs = props.getProperty("kinesis.getrecords.interval.ms", "1000");
+        // Lakehouse: en MSF vienen de Terraform; en el clúster local, de variables de entorno
+        final String icebergWarehouse = props.getProperty("iceberg.warehouse", System.getenv("ICEBERG_WAREHOUSE"));
+        final String icebergDatabase  = props.getProperty("iceberg.database",
+                System.getenv().getOrDefault("ICEBERG_DATABASE", "lakehouse_db"));
+        final String icebergTable     = props.getProperty("iceberg.table",
+                System.getenv().getOrDefault("ICEBERG_TABLE", "user_activity"));
+        final boolean lakehouseEnabled = icebergWarehouse != null && !icebergWarehouse.isBlank();
 
         LOG.info("Configuración: stream={} region={} ventana={}min tolerancia={}s idleness={}s allowedLateness={}s",
                 streamName, region, windowMinutes, outOfOrderSeconds, idlenessSeconds, allowedLatenessSec);
@@ -126,6 +142,36 @@ public class ClickstreamProcessingJob {
                 .addSink(new LoggingSink<>("LATE_EVENT", true))
                 .name("log-late-events")
                 .uid("log-late-events");
+
+        // ===== 5. Lakehouse: tabla Iceberg en el Glue Data Catalog =====
+        // El IcebergSink escribe archivos Parquet continuamente, pero COMMITEA (nuevo snapshot +
+        // puntero atómico en Glue) solo cuando Flink completa un checkpoint: sin checkpointing
+        // habría archivos en S3 y la tabla en el catálogo seguiría vacía.
+        // Upsert por (user_id, window_start): cuando allowedLateness re-emite una ventana
+        // corregida, la fila nueva REEMPLAZA a la anterior en lugar de duplicarla.
+        if (lakehouseEnabled) {
+            TableIdentifier tableId = TableIdentifier.of(icebergDatabase, icebergTable);
+            CatalogLoader catalogLoader = IcebergLakehouse.catalogLoader(icebergWarehouse, region);
+            IcebergLakehouse.ensureTable(catalogLoader, tableId);
+
+            DataStream<RowData> rows = userActivity
+                    .map(new IcebergLakehouse.ToRowData())
+                    .returns(InternalTypeInfo.of(FlinkSchemaUtil.convert(IcebergLakehouse.SCHEMA)))
+                    .name("to-iceberg-rowdata")
+                    .uid("to-iceberg-rowdata");
+
+            IcebergSink.forRowData(rows)
+                    .tableLoader(TableLoader.fromCatalog(catalogLoader, tableId))
+                    .equalityFieldColumns(IcebergLakehouse.EQUALITY_FIELDS)
+                    .upsert(true)
+                    .append()
+                    .name("iceberg-sink-user-activity")
+                    .uid("iceberg-sink-user-activity");
+
+            LOG.info("Lakehouse: {} en {} (catálogo Glue)", tableId, icebergWarehouse);
+        } else {
+            LOG.warn("Sin iceberg.warehouse / ICEBERG_WAREHOUSE: el job corre sin escribir en el Lakehouse");
+        }
 
         env.execute("clickstream-user-activity");
     }

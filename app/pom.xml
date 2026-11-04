@@ -6,7 +6,9 @@
   Regla de dependencias:
     - provided -> lo que ya trae el runtime de MSF (Flink core, clients, logging).
                   Incluirlo en el JAR provoca conflictos de versiones en el classpath.
-    - compile  -> lo que NO trae el runtime (conector de Kinesis, runtime de MSF, Jackson).
+    - compile  -> lo que NO trae el runtime (conector de Kinesis, runtime de MSF, Jackson,
+                  Iceberg + iceberg-aws-bundle y la API de Hadoop que requiere Iceberg).
+  Versiones alineadas: Flink 1.19.1 <-> iceberg-flink-runtime-1.19 (Iceberg 1.7.1).
                   Va dentro del uber-jar que arma maven-shade-plugin.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -26,6 +28,8 @@
         <kinesis.connector.version>4.3.0-1.19</kinesis.connector.version>
         <kda.runtime.version>1.2.0</kda.runtime.version>
         <jackson.version>2.15.4</jackson.version>
+        <iceberg.version>1.7.1</iceberg.version>
+        <hadoop.version>3.3.6</hadoop.version>
         <slf4j.version>1.7.36</slf4j.version>
     </properties>
 
@@ -49,6 +53,19 @@
             <version>${slf4j.version}</version>
             <scope>provided</scope>
         </dependency>
+        <!-- Tipos internos de Flink Table (RowData) que usa el sink de Iceberg: vienen en el runtime -->
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-table-common</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-table-runtime</artifactId>
+            <version>${flink.version}</version>
+            <scope>provided</scope>
+        </dependency>
 
         <!-- ===== compile: van dentro del uber-jar ===== -->
         <!-- Conector de Kinesis (no forma parte del runtime estándar) -->
@@ -62,6 +79,31 @@
             <groupId>com.amazonaws</groupId>
             <artifactId>aws-kinesisanalytics-runtime</artifactId>
             <version>${kda.runtime.version}</version>
+        </dependency>
+        <!-- ===== Pre-entrega 5: Lakehouse con Apache Iceberg ===== -->
+        <!-- Iceberg para Flink 1.19 (IcebergSink, CatalogLoader, TableLoader): versión alineada con el runtime -->
+        <dependency>
+            <groupId>org.apache.iceberg</groupId>
+            <artifactId>iceberg-flink-runtime-1.19</artifactId>
+            <version>${iceberg.version}</version>
+        </dependency>
+        <!-- GlueCatalog + S3FileIO (incluye el AWS SDK v2 que usan) -->
+        <dependency>
+            <groupId>org.apache.iceberg</groupId>
+            <artifactId>iceberg-aws-bundle</artifactId>
+            <version>${iceberg.version}</version>
+        </dependency>
+        <!-- Iceberg-Flink requiere org.apache.hadoop.conf.Configuration (no trae HDFS: se usa S3FileIO).
+             hadoop-client-api/runtime son las variantes "shaded": no contaminan el classpath. -->
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-client-api</artifactId>
+            <version>${hadoop.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-client-runtime</artifactId>
+            <version>${hadoop.version}</version>
         </dependency>
         <!-- Parseo del JSON de los eventos -->
         <dependency>

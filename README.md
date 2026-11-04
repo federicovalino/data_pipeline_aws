@@ -7,6 +7,7 @@ Plataforma de datos en AWS gestionada 100% con Terraform. Se construye por etapa
 | Pre-entrega 1 | Backend remoto con locking, VPC de datos privada con acceso a S3 por la red interna de AWS, bucket de Data Lake y roles IAM | [Infraestructura base](#arquitectura) |
 | Pre-entrega 2 | Ingesta real-time: Kinesis Data Stream (provisioned, KMS), Firehose hacia la capa Bronze del Data Lake, producer simulado y alarmas | [Ingesta real-time](#pre-entrega-2--ingesta-real-time-sobre-el-entorno-base) |
 | Pre-entrega 4 | Procesamiento en tiempo real: aplicación de Managed Service for Apache Flink con Event Time, watermarks, ventanas de 1 minuto, Keyed State y checkpointing, desplegada con Terraform | [Procesamiento en tiempo real](#pre-entrega-4--procesamiento-en-tiempo-real-con-managed-service-for-apache-flink) |
+| Pre-entrega 5 | Lakehouse: tabla Apache Iceberg escrita por Flink (IcebergSink), registrada en el Glue Data Catalog (`lakehouse_db`) y consultable con Athena, todo declarado en Terraform | [Lakehouse con Iceberg](#pre-entrega-5--pipeline-lakehouse-con-apache-iceberg-y-aws-glue-data-catalog) |
 
 ## Arquitectura
 
@@ -46,29 +47,31 @@ network.vpc_id, private_subnet_ids, identity.*_role_arn ──► outputs del en
 
 ```
 .
-├── bootstrap/                 # Root module 1: crea el backend (bucket de state + tabla de locks)
-│   ├── main.tf
-│   ├── variables.tf
-│   ├── outputs.tf
-│   └── backend.hcl.example    # plantilla de configuración del backend (backend.hcl no se versiona)
-├── modules/                   # Módulos reutilizables: no conocen el entorno, todo entra por variables
-│   ├── network/               # VPC, subredes privadas, tabla de rutas, S3 Gateway Endpoint
-│   ├── storage/               # Bucket del Data Lake con hardening
-│   ├── identity/              # Rol de ejecución y rol de auditoría
-│   ├── kinesis/               # Pre-entrega 2: Kinesis Data Stream + Firehose → S3, IAM y alarmas
-│   └── flink/                 # Pre-entrega 4: aplicación de Managed Service for Apache Flink, artefacto, IAM y logs
-├── environments/
-│   └── dev/                   # Root module 2: invoca los módulos con los valores de dev
-│       ├── backend.tf         # backend "s3" {} (configuración parcial)
-│       ├── providers.tf       # versiones + provider AWS con default_tags
-│       ├── main.tf            # llamadas a los módulos
-│       ├── variables.tf       # environment, region, vpc_cidr, project_name (tipadas y validadas)
-│       ├── terraform.tfvars   # valores de dev
-│       ├── outputs.tf
-│       └── backend.hcl.example
-├── flink-app/                 # Pre-entrega 4: código de la aplicación Flink (Java 11, Maven)
-├── scripts/                   # producer simulado (Python/Boto3) y evento de prueba para la CLI
-├── docs/                      # capturas de verificación
+├── infra/                         # Infraestructura como código (Terraform)
+│   ├── bootstrap/                 # Root module 1: crea el backend (bucket de state + tabla de locks)
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   └── backend.hcl.example    # plantilla de configuración del backend (backend.hcl no se versiona)
+│   ├── modules/                   # Módulos reutilizables: no conocen el entorno, todo entra por variables
+│   │   ├── network/               # VPC, subredes privadas, tabla de rutas, S3 Gateway Endpoint
+│   │   ├── storage/               # Bucket del Data Lake con hardening
+│   │   ├── identity/              # Rol de ejecución y rol de auditoría
+│   │   ├── kinesis/               # Pre-entrega 2: Kinesis Data Stream + Firehose → S3, IAM y alarmas
+│   │   ├── flink/                 # Pre-entrega 4: aplicación de Managed Service for Apache Flink, artefacto, IAM y logs
+│   │   └── lakehouse/             # Pre-entrega 5: bucket del Lakehouse, Glue Data Catalog (lakehouse_db), Athena e IAM
+│   └── environments/
+│       └── dev/                   # Root module 2: invoca los módulos con los valores de dev
+│           ├── backend.tf         # backend "s3" {} (configuración parcial)
+│           ├── providers.tf       # versiones + provider AWS con default_tags
+│           ├── main.tf            # llamadas a los módulos
+│           ├── variables.tf       # environment, region, vpc_cidr, project_name (tipadas y validadas)
+│           ├── terraform.tfvars   # valores de dev
+│           ├── outputs.tf
+│           └── backend.hcl.example
+├── app/                           # Aplicación Flink (Java 11, Maven): pre-entregas 4 y 5
+├── scripts/                       # producer simulado (Python/Boto3) y evento de prueba para la CLI
+├── docs/                          # capturas de verificación
 ├── PLAN_OUTPUT.md
 └── README.md
 ```
@@ -89,7 +92,7 @@ network.vpc_id, private_subnet_ids, identity.*_role_arn ──► outputs del en
 El backend no puede crearse desde el mismo proyecto que lo usa (Terraform necesita el bucket para guardar su state), por eso vive en un root module separado.
 
 ```bash
-cd bootstrap
+cd infra/bootstrap
 terraform init
 terraform apply            # crea el bucket de state y la tabla de locks
 ```
@@ -182,7 +185,7 @@ La asociación con las subredes privadas se verifica en **VPC → Tablas de ruta
 | `bronze_s3_prefix` | Prefijo de S3 donde Firehose entrega los datos crudos (pre-entrega 2) |
 
 ```bash
-cd environments/dev
+cd infra/environments/dev
 terraform output
 ```
 
@@ -254,7 +257,7 @@ El producer usa `user_id` como `PartitionKey`:
 ### Despliegue
 
 ```bash
-cd environments/dev
+cd infra/environments/dev
 terraform init -backend-config="backend.hcl"
 terraform plan
 terraform apply
@@ -345,7 +348,7 @@ Las alarmas `dataplatform-dev-stream-write-throughput-exceeded` y `dataplatform-
 En modo provisioned cada shard se cobra por hora aunque no reciba datos. La prueba se hizo y se destruyó en el mismo día:
 
 ```bash
-cd environments/dev
+cd infra/environments/dev
 terraform destroy
 ```
 
@@ -407,10 +410,10 @@ Salida (una línea JSON por usuario y minuto, fácil de consultar en CloudWatch 
 USER_ACTIVITY {"user_id":"user-0007","window_start":"2026-11-04T14:05:00Z","window_end":"2026-11-04T14:06:00Z","total_events":4,"page_views":1,"clicks":0,"add_to_cart":3,"checkouts":0,"pending_cart_items":3,"abandonment_risk":true,"alert_triggered":true}
 ```
 
-### Código de la aplicación (`flink-app/`)
+### Código de la aplicación (`app/`)
 
 ```
-flink-app/
+app/
 ├── pom.xml                                   # Flink 1.19.1 (provided) + conector Kinesis (compile) → uber-jar
 └── src/main/java/com/dataplatform/flink/
     ├── ClickstreamProcessingJob.java          # main: source, watermarks, ventana, sinks
@@ -419,14 +422,14 @@ flink-app/
     ├── CartAbandonmentFunction.java           # ProcessWindowFunction con Keyed State + TTL
     ├── UserActivity.java                      # resultado por usuario y ventana
     └── LoggingSink.java                       # sink a los logs de la aplicación (CloudWatch)
-flink-app/local/docker-compose.yml             # clúster Flink 1.19 local para correr el mismo .jar contra Kinesis
+app/local/docker-compose.yml             # clúster Flink 1.19 local para correr el mismo .jar contra Kinesis
 ```
 
 **Empaquetado:** las librerías de Flink (`flink-streaming-java`, `flink-clients`) y el logging van como `provided`, porque las trae el runtime de MSF; incluirlas genera conflictos de classpath. Dentro del uber-jar (`maven-shade-plugin`) van solo el conector de Kinesis, `aws-kinesisanalytics-runtime` (para leer las propiedades definidas en Terraform) y Jackson.
 
 **Configuración sin valores en el código:** el stream, la región y los parámetros de tiempo (ventana, tolerancia, idleness, allowed lateness) llegan como propiedades de la aplicación (`FlinkApplicationProperties`), definidas en Terraform.
 
-### Infraestructura (`modules/flink/`)
+### Infraestructura (`infra/modules/flink/`)
 
 | Recurso | Configuración | Por qué |
 |---|---|---|
@@ -467,14 +470,14 @@ El paralelismo se toma del output `shard_count` del módulo `kinesis`: si el str
 **1. Compilar la aplicación** (no requiere Java ni Maven instalados: usa Docker):
 
 ```powershell
-docker run --rm -v "${PWD}/flink-app:/app" -w /app maven:3.9-eclipse-temurin-11 mvn -B -q package
-# genera flink-app/target/clickstream-processor-1.0.jar
+docker run --rm -v "${PWD}/app:/app" -w /app maven:3.9-eclipse-temurin-11 mvn -B -q package
+# genera app/target/clickstream-processor-1.0.jar
 ```
 
 **2. Subir el código y desplegar (la aplicación queda creada pero detenida):**
 
 ```bash
-cd environments/dev
+cd infra/environments/dev
 terraform init -backend-config="backend.hcl"
 terraform validate
 terraform plan
@@ -510,15 +513,17 @@ creating or updating applications. Create a support case with the AWS Account Ve
 for further assistance.
 ```
 
+![Error de verificación de cuenta al crear la aplicación MSF con terraform apply](docs/flink-conflict-creation.png)
+
 Es una restricción que AWS aplica a cuentas nuevas para Managed Service for Apache Flink. Se abrió un caso de soporte para habilitar el servicio. Una vez habilitado, alcanza con repetir `terraform apply`: el resto de la infraestructura ya existe y Terraform solo crea la aplicación.
 
 #### Ejecución del mismo job en un clúster Flink 1.19 contra el Kinesis real
 
-Mientras tanto, para validar el procesamiento de punta a punta, el **mismo `.jar`** se ejecutó en un clúster Flink **1.19.1** (la versión del runtime `FLINK-1_19` de MSF) levantado con Docker (`flink-app/local/docker-compose.yml`: JobManager y TaskManager con 2 slots, RocksDB y checkpoints cada 60 s). El job consumió el **Kinesis Data Stream real** de AWS (`dataplatform-dev-stream`, 2 shards, cifrado con KMS) con las credenciales del usuario IAM. Sin propiedades de MSF, el job usa sus valores por defecto: el mismo stream, región, ventana de 1 minuto, 10 s de tolerancia, 1 min de idleness y 30 s de *allowed lateness*.
+Mientras tanto, para validar el procesamiento de punta a punta, el **mismo `.jar`** se ejecutó en un clúster Flink **1.19.1** (la versión del runtime `FLINK-1_19` de MSF) levantado con Docker (`app/local/docker-compose.yml`: JobManager y TaskManager con 2 slots, RocksDB y checkpoints cada 60 s). El job consumió el **Kinesis Data Stream real** de AWS (`dataplatform-dev-stream`, 2 shards, cifrado con KMS) con las credenciales del usuario IAM. Sin propiedades de MSF, el job usa sus valores por defecto: el mismo stream, región, ventana de 1 minuto, 10 s de tolerancia, 1 min de idleness y 30 s de *allowed lateness*.
 
 ```powershell
-docker compose -f flink-app/local/docker-compose.yml up -d
-docker compose -f flink-app/local/docker-compose.yml exec jobmanager flink run -d -p 2 /job/clickstream-processor-1.0.jar
+docker compose -f app/local/docker-compose.yml up -d
+docker compose -f app/local/docker-compose.yml exec jobmanager flink run -d -p 2 /job/clickstream-processor-1.0.jar
 python scripts/producer.py --stream-name dataplatform-dev-stream --count 600 --users 20 --interval 0.5 --late-rate 0.05
 ```
 
@@ -529,12 +534,30 @@ python scripts/producer.py --stream-name dataplatform-dev-stream --count 600 --u
 **2. Resultados del procesamiento** (logs del TaskManager, donde escribe `LoggingSink`):
 
 ```powershell
-docker compose -f flink-app/local/docker-compose.yml logs taskmanager | Select-String "USER_ACTIVITY|CART_ABANDONMENT_ALERT|LATE_EVENT"
+docker compose -f app/local/docker-compose.yml logs taskmanager | Select-String "USER_ACTIVITY|CART_ABANDONMENT_ALERT|LATE_EVENT"
 ```
 
 ```
-TODO: pegar la salida (líneas USER_ACTIVITY, CART_ABANDONMENT_ALERT y LATE_EVENT)
+06:07:21 WARN  LATE_EVENT ClickEvent{user-0010, checkout, 2026-11-04T06:05:52.957445+00:00}
+06:07:24 INFO  USER_ACTIVITY {"user_id":"user-0001","window_start":"2026-11-04T06:06:00Z","window_end":"2026-11-04T06:07:00Z","total_events":1,"page_views":0,"clicks":0,"add_to_cart":1,"checkouts":0,"pending_cart_items":1,"abandonment_risk":false,"alert_triggered":false}
+06:07:29 WARN  LATE_EVENT ClickEvent{user-0008, add_to_cart, 2026-11-04T06:05:58.036889+00:00}
+06:08:12 INFO  USER_ACTIVITY {"user_id":"user-0001","window_start":"2026-11-04T06:07:00Z","window_end":"2026-11-04T06:08:00Z","total_events":7,"page_views":0,"clicks":2,"add_to_cart":5,"checkouts":0,"pending_cart_items":6,"abandonment_risk":true,"alert_triggered":true}
+06:08:12 WARN  CART_ABANDONMENT_ALERT {"user_id":"user-0001","window_start":"2026-11-04T06:07:00Z","window_end":"2026-11-04T06:08:00Z","total_events":7,"page_views":0,"clicks":2,"add_to_cart":5,"checkouts":0,"pending_cart_items":6,"abandonment_risk":true,"alert_triggered":true}
+06:08:12 INFO  USER_ACTIVITY {"user_id":"user-0003","window_start":"2026-11-04T06:07:00Z","window_end":"2026-11-04T06:08:00Z","total_events":6,"page_views":3,"clicks":2,"add_to_cart":0,"checkouts":1,"pending_cart_items":0,"abandonment_risk":false,"alert_triggered":false}
+06:08:12 INFO  USER_ACTIVITY {"user_id":"user-0006","window_start":"2026-11-04T06:07:00Z","window_end":"2026-11-04T06:08:00Z","total_events":8,"page_views":2,"clicks":2,"add_to_cart":4,"checkouts":0,"pending_cart_items":4,"abandonment_risk":true,"alert_triggered":true}
+06:08:12 WARN  CART_ABANDONMENT_ALERT {"user_id":"user-0006","window_start":"2026-11-04T06:07:00Z","window_end":"2026-11-04T06:08:00Z","total_events":8,"page_views":2,"clicks":2,"add_to_cart":4,"checkouts":0,"pending_cart_items":4,"abandonment_risk":true,"alert_triggered":true}
+06:08:12 INFO  USER_ACTIVITY {"user_id":"user-0009","window_start":"2026-11-04T06:07:00Z","window_end":"2026-11-04T06:08:00Z","total_events":6,"page_views":1,"clicks":3,"add_to_cart":0,"checkouts":1,"pending_cart_items":0,"abandonment_risk":false,"alert_triggered":false}
+06:08:31 INFO  USER_ACTIVITY {"user_id":"user-0009","window_start":"2026-11-04T06:07:00Z","window_end":"2026-11-04T06:08:00Z","total_events":7,"page_views":1,"clicks":4,"add_to_cart":0,"checkouts":1,"pending_cart_items":0,"abandonment_risk":false,"alert_triggered":false}
 ```
+
+*(extracto; hora del TaskManager en UTC)*
+
+**Lectura de la salida:**
+
+- **Ventanas de 1 minuto por usuario:** a las 06:08:12, apenas el watermark pasó las 06:08:00 (fin de ventana + 10 s de tolerancia), se emitió un `USER_ACTIVITY` por cada usuario activo en la ventana `06:07–06:08`.
+- **Keyed State entre ventanas:** `user-0001` venía con 1 producto pendiente de la ventana anterior y sumó 5 sin checkout: `pending_cart_items = 6`, y se emitió **una** `CART_ABANDONMENT_ALERT`. `user-0003` hizo checkout y su carrito quedó en 0.
+- **Allowed lateness:** a las 06:08:31 la ventana `06:07–06:08` de `user-0009` se **re-emitió corregida** (de 6 a 7 eventos, de 3 a 4 clicks) porque llegó un evento tardío dentro de los 30 s permitidos.
+- **Side Output:** los eventos que el producer generó con event time atrasado (`--late-rate`), por ejemplo un `checkout` de las 06:05:52 que llegó a las 06:07:21, ya no tenían ventana abierta y salieron como `LATE_EVENT`, en lugar de perderse en silencio.
 
 ![Resultados del job](docs/flink-results.png)
 
@@ -582,9 +605,279 @@ MSF se factura por KPU-hora mientras la aplicación corre: 3 KPU en este diseño
 aws kinesisanalyticsv2 stop-application --application-name dataplatform-dev-clickstream-flink
 
 # Eliminar todo el entorno
-cd environments/dev
+cd infra/environments/dev
 terraform destroy
 ```
+
+## Pre-entrega 5 — Pipeline Lakehouse con Apache Iceberg y AWS Glue Data Catalog
+
+La salida del job de Flink deja de ser solo un log y pasa a ser una **tabla Apache Iceberg** (`lakehouse_db.user_activity`), registrada y gobernada en el **AWS Glue Data Catalog** y consultable con **Athena**. Así el resultado del streaming tiene transacciones ACID, *time travel* y evolución de esquema sobre S3.
+
+### Arquitectura
+
+```
+ Kinesis (dataplatform-dev-stream) ──► Flink: ventana 1 min por user_id + Keyed State      (pre-entrega 4)
+                                           │
+                                           ├─► CloudWatch / logs: USER_ACTIVITY, alertas, tardíos
+                                           │
+                                           └─► IcebergSink  (upsert por user_id + window_start)
+                                                 │  escribe Parquet continuamente
+                                                 │  commitea en cada checkpoint (60 s)
+                                                 ▼
+ ┌──────────────── Capa de catálogo ────────────────┐
+ │ AWS Glue Data Catalog · base lakehouse_db         │  puntero atómico al metadata.json vigente
+ │   tabla user_activity (table_type = ICEBERG)      │  (commit = UpdateTable condicionado al VersionId)
+ └───────────────────────┬───────────────────────────┘
+                         ▼
+ ┌──────────────── Capa de almacenamiento: s3://dataplatform-dev-lakehouse-<account>/warehouse/ ────────────────┐
+ │ lakehouse_db.db/user_activity/                                                                               │
+ │   metadata/00012-….metadata.json   esquema, partition spec, lista de snapshots                              │
+ │   metadata/snap-….avro             manifest list del snapshot (estadísticas por manifest)                    │
+ │   metadata/….-m0.avro              manifests: archivos de datos + min/max por columna                        │
+ │   data/window_start_day=2026-11-04/….parquet   archivos de datos (Parquet + zstd)                          │
+ └──────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+                         ▲
+ Athena (workgroup dataplatform-dev-lakehouse, engine v3): lee el snapshot vigente, nunca escrituras a medias
+```
+
+### Infraestructura (`infra/modules/lakehouse/`)
+
+| Recurso | Configuración | Por qué |
+|---|---|---|
+| `aws_glue_catalog_database` **`lakehouse_db`** | `location_uri = s3://…-lakehouse-…/warehouse/lakehouse_db.db` | Metastore central del Lakehouse: contiene el puntero a la metadata vigente de cada tabla Iceberg |
+| `aws_s3_bucket` (Lakehouse) | **Versionado**, SSE, sin acceso público, solo HTTPS, lifecycle (versiones viejas a 7 días y resultados de Athena a 7 días) | Separado del Data Lake de la pre-entrega 1: aquel solo admite objetos vía VPC Endpoint, y los actores del Lakehouse (Flink en MSF, Glue, Athena) son servicios administrados que acceden desde fuera de la VPC |
+| `aws_athena_workgroup` | Engine v3 (requerido para Iceberg), resultados en `athena-results/` | Consumo SQL de las tablas |
+| `aws_iam_policy` **`lakehouse-writer`** | `glue:GetDatabase/GetTable/GetTables/CreateTable/UpdateTable` **solo** sobre `lakehouse_db` y sus tablas; `s3:Get/Put/DeleteObject` **solo** sobre `warehouse/*` | Se adjunta al rol de ejecución de Flink desde `environments/dev` (`additional_policy_arns`), sin acoplar los módulos |
+
+Integración con lo anterior (`infra/environments/dev/main.tf`): el módulo `flink` recibe del módulo `lakehouse` el warehouse, la base, la tabla y la política del escritor. Los valores llegan a la app como propiedades de MSF (`iceberg.warehouse`, `iceberg.database`, `iceberg.table`), sin nada escrito en el código.
+
+### Implementación en Flink (`app/`)
+
+**Dependencias** (`app/pom.xml`, versiones alineadas para evitar el *mismatch* de versiones):
+
+| Dependencia | Scope | Rol |
+|---|---|---|
+| `iceberg-flink-runtime-1.19` 1.7.1 | compile | `IcebergSink`, `CatalogLoader`, `TableLoader`, para el mismo Flink 1.19 del runtime de MSF |
+| `iceberg-aws-bundle` 1.7.1 | compile | `GlueCatalog` y `S3FileIO` (AWS SDK v2) |
+| `hadoop-client-api` / `hadoop-client-runtime` 3.3.6 | compile | Iceberg-Flink requiere `org.apache.hadoop.conf.Configuration`. Se usan las variantes *shaded*: no se usa HDFS y no contaminan el classpath |
+| `flink-table-common` / `flink-table-runtime` | provided | Tipos `RowData` que consume el sink; los trae el runtime |
+
+**Catálogo** (`IcebergLakehouse.catalogLoader`): `CatalogLoader.custom(..., "org.apache.iceberg.aws.glue.GlueCatalog")` con `warehouse`, `io-impl = S3FileIO` y la región.
+
+**Tabla** (`IcebergLakehouse.ensureTable`): la base la crea Terraform; la tabla la crea la app **si no existe**, con un esquema de **IDs de columna explícitos** (la base de la evolución segura de esquemas), formato v2 y su partition spec. Es idempotente: en cada arranque reutiliza la tabla existente.
+
+**Esquema de `user_activity`:**
+
+| Columna | Tipo | |
+|---|---|---|
+| `user_id` | string (required) | identifier field |
+| `window_start` | timestamp (required) | identifier field · **fuente de la partición** |
+| `window_end` | timestamp | |
+| `total_events`, `page_views`, `clicks`, `add_to_cart`, `checkouts` | long | contadores de la ventana |
+| `pending_cart_items` | long | Keyed State entre ventanas |
+| `abandonment_risk`, `alert_triggered` | boolean | |
+| `processed_at` | timestamp | momento de escritura (auditoría) |
+
+**Sink** (`ClickstreamProcessingJob`):
+
+```java
+IcebergSink.forRowData(rows)
+        .tableLoader(TableLoader.fromCatalog(catalogLoader, tableId))
+        .equalityFieldColumns(List.of("user_id", "window_start"))
+        .upsert(true)
+        .append();
+```
+
+- **Commits atados al checkpoint:** el sink escribe Parquet continuamente, pero **commitea** (nuevo snapshot y actualización atómica del puntero en Glue) solo cuando Flink completa un checkpoint, cada 60 s (`checkpoint_configuration` en Terraform). Sin checkpointing habría archivos en S3 y la tabla en el catálogo seguiría vacía.
+- **Upsert:** `allowedLateness` puede re-emitir una ventana corregida. Con upsert por `(user_id, window_start)`, la fila corregida **reemplaza** a la anterior (equality delete de Iceberg v2) en lugar de duplicarla. Es la misma idempotencia que ya tenía el estado del carrito, ahora también en la tabla.
+- **Exactly-once de punta a punta:** offsets de Kinesis y archivos pendientes viajan en el mismo checkpoint. Ante un fallo, Flink retoma desde el último checkpoint y los archivos no commiteados nunca se vuelven visibles.
+
+### Estrategia de particionado: `day(window_start)`
+
+```java
+PartitionSpec.builderFor(SCHEMA).day("window_start").build();
+```
+
+- **Partition pruning:** las consultas del negocio filtran por tiempo ("actividad de hoy", "últimas 2 horas"). Con `day(window_start)`, Athena descarta los días que no corresponden **antes** de abrir un solo archivo.
+- **Hidden partitioning:** la columna de partición es derivada. El analista filtra por `window_start` como en cualquier tabla y Iceberg aplica el pruning solo, sin columnas `year/month/day` artificiales como en Hive.
+- **Cardinalidad razonable:** una partición por día, unas 365 al año. No se particiona por `user_id`: con alta cardinalidad generaría miles de particiones con archivos minúsculos, *metadata overhead* en Glue y en los manifests, y una planificación de consultas más lenta que la ejecución. Si en el futuro hiciera falta acelerar los filtros por usuario, se agregaría `bucket(16, user_id)` (cardinalidad acotada) o un *sort order* por `user_id` en la compactación, sin reescribir la tabla gracias a la evolución de partición de Iceberg.
+- **Eventos tardíos:** la partición sale del **event time** de la ventana, no de la hora de escritura. Una ventana de las 23:59 corregida a las 00:00:20 sigue cayendo en su día.
+
+### Concurrencia de commits en Glue
+
+El `GlueCatalog` commitea con **control de concurrencia optimista**: `UpdateTable` condicionado al `VersionId` que la tabla tenía al empezar el commit. Glue rechaza el cambio si otro escritor commiteó en el medio. El *lock* lo provee el propio Glue, sin necesidad de una tabla DynamoDB de locks.
+
+- **Un único committer:** el `IcebergSink` hace el commit desde un solo operador (paralelismo 1 del committer), aunque escriban 2 subtasks. No hay commits concurrentes del mismo job, y por lo tanto no aparece `ConcurrentModificationException`.
+- **Reintentos:** si en el futuro otro proceso escribe la misma tabla (por ejemplo, la compactación), `commit.retry.num-retries = 10` reintenta sobre la metadata nueva en lugar de fallar.
+- `glue.skip-archive = true`: Glue no guarda una versión de la tabla por cada commit (con commits cada minuto, serían miles). El historial queda en los snapshots de Iceberg.
+
+### Propiedades de la tabla y mantenimiento
+
+| Propiedad | Valor | Para qué |
+|---|---|---|
+| `format-version` | 2 | Upserts con equality deletes |
+| `write.format.default` / `compression-codec` | parquet / zstd | Columnar y comprimido |
+| `write.target-file-size-bytes` | 128 MB | Tamaño objetivo de archivo (lo alcanza la compactación) |
+| `write.distribution-mode` | hash | Agrupa por partición antes de escribir: menos archivos por commit |
+| `write.metadata.delete-after-commit.enabled` / `previous-versions-max` | true / 50 | Acota los `metadata.json` viejos |
+| `history.expire.max-snapshot-age-ms` | 7 días | Ventana de *time travel* |
+| `commit.retry.num-retries` | 10 | Reintentos ante conflictos de commit |
+
+**Small files:** con un commit por minuto, la tabla genera ~2 archivos por minuto, unos 2.880 por día (los de datos y los de deletes de los upserts). Es el costo de la frescura. Se corrige con mantenimiento periódico, por ejemplo diario, desde Athena o un job de Glue programado:
+
+```sql
+-- Compactación bin-pack: combina archivos chicos en archivos de ~128 MB
+OPTIMIZE lakehouse_db.user_activity REWRITE DATA USING BIN_PACK
+  WHERE window_start >= CAST(current_timestamp AS timestamp) - interval '1' day;
+
+-- Expira snapshots fuera de la retención (7 días) y borra los archivos huérfanos
+VACUUM lakehouse_db.user_activity;
+```
+
+La compactación tiene costo (*write amplification*: reescribe datos que ya estaban en S3), por eso se hace diaria y sobre la partición reciente, no en cada commit. Alternativa administrada: la *auto-compaction* del Glue Data Catalog para tablas Iceberg.
+
+### Despliegue y prueba
+
+```powershell
+# 1. Compilar (incluye Iceberg; el .jar pesa más que en la pre-entrega 4)
+docker run --rm -v "${PWD}/app:/app" -w /app maven:3.9-eclipse-temurin-11 mvn -B -q package
+
+# 2. Infraestructura: lakehouse_db, bucket, Athena, IAM (+ lo de las pre-entregas anteriores)
+cd infra/environments/dev
+terraform init -backend-config="backend.hcl"
+terraform apply
+$env:ICEBERG_WAREHOUSE = terraform output -raw lakehouse_warehouse
+cd ../../..
+
+# 3. Ejecutar el job. En MSF: aws kinesisanalyticsv2 start-application ...
+#    Mientras la cuenta no tenga MSF habilitado: el mismo .jar en el clúster Flink 1.19 local
+docker compose -f app/local/docker-compose.yml up -d
+docker compose -f app/local/docker-compose.yml exec jobmanager flink run -d -p 2 /job/clickstream-processor-1.0.jar
+
+# 4. Tráfico
+python scripts/producer.py --stream-name dataplatform-dev-stream --count 600 --users 20 --interval 0.5 --late-rate 0.05
+```
+
+Esperar al menos 2 checkpoints (2 minutos) y verificar en Glue, S3 y Athena.
+
+> **Nota sobre MSF:** la cuenta sigue con la restricción de verificación descripta en la pre-entrega 4 (`UnsupportedOperationException … needs additional verification`, ver [captura](docs/flink-conflict-creation.png)). Por eso la evidencia de abajo se generó con el mismo `.jar` corriendo en el clúster Flink 1.19.1 local, contra el Kinesis, el Glue Data Catalog, el S3 y el Athena **reales** de AWS. El código y la infraestructura son los mismos: cuando AWS habilite el servicio, `terraform apply` crea la aplicación con las propiedades `iceberg.*` y la política `lakehouse-writer` ya adjunta.
+
+### Evidencia
+
+#### 1. Tabla Iceberg registrada en el Glue Data Catalog
+
+Consola de AWS Glue → Data Catalog → Databases → `lakehouse_db` → Tables → `user_activity` (tipo de tabla **Iceberg**, esquema y ubicación en S3):
+
+![Tabla Iceberg en el Glue Data Catalog](docs/glue-iceberg-table.png)
+
+#### 2. Formato Iceberg en S3: carpeta `metadata/`
+
+```powershell
+aws s3 ls "$env:ICEBERG_WAREHOUSE/lakehouse_db.db/user_activity/metadata/"
+```
+
+```
+2026-11-04 14:22:01    2681 00000-96d2ddb0-c561-4079-9108-5898a5feb5e2.metadata.json
+2026-11-04 14:23:50    4341 00001-05821f1f-2653-4738-9fa8-8a1ad667a738.metadata.json
+2026-11-04 14:24:50    5946 00002-c8afa934-2367-49ac-a9b3-8731013d0269.metadata.json
+2026-11-04 14:25:49    7470 00003-2d7d11ea-4980-45e6-b8c0-99b68358f9c9.metadata.json
+2026-11-04 14:26:49    8994 00004-f089b39b-5f83-41a1-b1d2-285c2ccf50af.metadata.json
+2026-11-04 14:27:49   10600 00005-ab3bf576-b19e-482f-aa5a-bfa1c4920562.metadata.json
+2026-11-04 14:28:49   12208 00006-307a0758-2c5e-4655-9e5a-742c023e0255.metadata.json
+2026-11-04 14:28:48    7808 5da6c0f1-a8d5-42a5-a632-a14541a878ad-m0.avro
+2026-11-04 14:28:48    7741 5da6c0f1-a8d5-42a5-a632-a14541a878ad-m1.avro
+...
+2026-11-04 14:23:50    4509 snap-1730212703600013605-1-cdf8f97c-5f79-43a5-afa0-dafd8bdbbe6a.avro
+2026-11-04 14:24:49    4592 snap-8446357772246081948-1-69f8ebb8-4a08-4819-bbe2-6f5bf2fb8334.avro
+2026-11-04 14:25:48    4647 snap-7734524313382199758-1-5fe2fe71-02a1-466d-b6e3-c70154f9b752.avro
+2026-11-04 14:26:49    4702 snap-6531474432029485937-1-61d21eef-8153-41a5-a129-f5f2862a871d.avro
+2026-11-04 14:27:49    4763 snap-8855986889323893130-1-ddf66a93-d229-4c28-ac98-31a0c53b5011.avro
+2026-11-04 14:28:49    4822 snap-9008163909663980986-1-5da6c0f1-a8d5-42a5-a632-a14541a878ad.avro
+```
+
+*(hora local UTC-3; extracto)*
+
+**Lectura:**
+
+- **`00000-….metadata.json`:** la creación de la tabla (esquema, partition spec y propiedades, sin snapshots) que hizo `ensureTable` al arrancar el job.
+- **`00001` a `00006`:** un `metadata.json` nuevo **cada ~60 segundos**, es decir, un commit por cada checkpoint de Flink. Cada uno referencia todos los snapshots anteriores, por eso crece (de 4 KB a 12 KB).
+- **`snap-….avro` (manifest lists):** uno por snapshot, con el mismo timestamp que su `metadata.json`.
+- **`…-m0.avro` y `…-m1.avro` (manifests):** dos por commit, que listan los archivos que agrega cada snapshot. Con upsert (Iceberg v2), un commit registra los archivos de datos y los *delete files* que reemplazan las versiones anteriores de las ventanas re-emitidas por `allowedLateness`.
+- La jerarquía completa del formato Iceberg (catálogo → metadata JSON → manifest list → manifests → Parquet) queda verificada en S3, y en Glue la tabla apunta a la ubicación `warehouse/lakehouse_db.db/user_activity`.
+
+#### 3. Consulta en Athena: los datos reflejan las transformaciones de Flink
+
+Athena → workgroup `dataplatform-dev-lakehouse` → base `lakehouse_db`:
+
+```sql
+SELECT user_id, window_start, window_end, total_events, add_to_cart, checkouts,
+       pending_cart_items, abandonment_risk, alert_triggered
+FROM lakehouse_db.user_activity
+WHERE window_start >= TIMESTAMP '2026-11-04 00:00:00'   -- partition pruning por day(window_start)
+ORDER BY window_start DESC, pending_cart_items DESC
+LIMIT 20;
+```
+
+```
+user_id    window_start             window_end               total_events add_to_cart checkouts pending_cart_items abandonment_risk alert_triggered
+user-0001  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  7            3           0         3                  true             true
+user-0011  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  2            0           0         2                  false            false
+user-0003  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  1            1           0         2                  false            false
+user-0007  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  5            1           0         1                  false            false
+user-0000  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  5            3           1         0                  false            false
+user-0006  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  8            1           2         0                  false            false
+user-0018  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  6            2           3         0                  false            false
+...        (20 filas, una por usuario, ventana 17:27–17:28 UTC)
+```
+
+**Lectura:**
+
+- Cada fila es el resultado de una **ventana tumbling de 1 minuto por usuario** calculada por Flink (`window_start`/`window_end` alineados al minuto, en UTC).
+- `pending_cart_items` sale del **Keyed State** del `CartAbandonmentFunction`: es acumulado entre ventanas, por eso puede ser mayor que `add_to_cart` de la ventana (ej. `user-0011`: 0 agregados en este minuto, 2 pendientes de minutos anteriores) o quedar en 0 cuando hubo checkouts (`user-0000`, `user-0006`, `user-0018`).
+- `user-0001` llegó a 3 ítems pendientes sin checkout: Flink marcó `abandonment_risk = true` y disparó la alerta (`alert_triggered = true`). La regla de negocio del job queda visible directamente en SQL sobre el Lakehouse.
+- Gracias al upsert por `(user_id, window_start)`, las ventanas re-emitidas por `allowedLateness` no se duplican: hay **una sola fila por usuario y ventana**.
+
+![Consulta en Athena sobre la tabla Iceberg](docs/athena-iceberg-query.png)
+
+#### 4. Snapshots (un commit por checkpoint) y time travel
+
+```sql
+SELECT committed_at, snapshot_id, operation, summary['added-records'] AS added_records
+FROM "lakehouse_db"."user_activity$snapshots"
+ORDER BY committed_at DESC
+LIMIT 10;
+
+-- Time travel: la tabla tal como estaba hace 5 minutos
+SELECT count(*) FROM lakehouse_db.user_activity
+FOR TIMESTAMP AS OF (current_timestamp - interval '5' minute);
+```
+
+```
+committed_at                 snapshot_id          operation  added_records
+2026-11-04 17:28:47.935 UTC  9008163909663980986  overwrite  22
+2026-11-04 17:27:47.948 UTC  8855986889323893130  overwrite  21
+2026-11-04 17:26:48.039 UTC  6531474432029485937  overwrite  20
+2026-11-04 17:25:47.900 UTC  7734524313382199758  overwrite  19
+2026-11-04 17:24:48.717 UTC  8446357772246081948  overwrite  21
+2026-11-04 17:23:48.961 UTC  1730212703600013605  overwrite  21
+```
+
+*(Tiempo de ejecución 652 ms, 6.61 KB escaneados)*
+
+![Snapshots de la tabla Iceberg en Athena](docs/athena-iceberg-snapshots.png)
+
+**Lectura:**
+
+- **6 snapshots, uno cada ~60 s:** coinciden con el intervalo de checkpoint de Flink (el `IcebergSink` commitea al completar cada checkpoint) y con los `metadata.json` `00001`–`00006` de S3 (14:23:50 → 14:28:49 en hora local = 17:23:48 → 17:28:47 UTC).
+- **Los `snapshot_id` son los mismos que nombran los `snap-<id>-….avro`** del listado de S3: la manifest list de cada snapshot.
+- **`operation = overwrite`** (no `append`): con `upsert(true)` y `equalityFieldColumns(user_id, window_start)` cada commit escribe filas nuevas **y** *equality deletes* que invalidan la versión anterior de esa clave. Es Iceberg v2 en modo merge-on-read.
+- **`added_records` ≈ 20 por commit:** una fila por cada uno de los 20 usuarios simulados por ventana, más las re-emisiones por eventos tardíos.
+
+Cada fila de `$snapshots` es un checkpoint de Flink que commiteó, con commits cada ~60 s y sin errores de concurrencia.
+
+### Costos y limpieza
+
+El bucket del Lakehouse y el workgroup de Athena tienen `force_destroy`, así que `terraform destroy` los elimina aunque contengan datos y versiones. Athena cobra por datos escaneados: con el particionado por día y el volumen de esta prueba, son centavos.
 
 ## Cómo extender a prod
 
@@ -612,7 +905,7 @@ tflint --recursive        # opcional
 ## Limpieza
 
 ```bash
-cd environments/dev
+cd infra/environments/dev
 terraform destroy          # elimina red, Data Lake, roles, stream, Firehose y alarmas
 ```
 

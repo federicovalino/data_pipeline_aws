@@ -70,11 +70,25 @@
       <version>1.7.36</version>
       <scope>provided</scope>
     </dependency>
+    <dependency>
+      <groupId>org.apache.flink</groupId>
+      <artifactId>flink-table-common</artifactId>
+      <version>1.19.1</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.flink</groupId>
+      <artifactId>flink-table-runtime</artifactId>
+      <version>1.19.1</version>
+      <scope>provided</scope>
+    </dependency>
   </dependencies>
   <properties>
     <maven.compiler.release>11</maven.compiler.release>
     <jackson.version>2.15.4</jackson.version>
     <flink.version>1.19.1</flink.version>
+    <hadoop.version>3.3.6</hadoop.version>
+    <iceberg.version>1.7.1</iceberg.version>
     <slf4j.version>1.7.36</slf4j.version>
     <kinesis.connector.version>4.3.0-1.19</kinesis.connector.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>

@@ -61,7 +61,7 @@ locals {
   # la VPC (ej. Kinesis Firehose) se listan en vpce_exempt_principal_arns.
   # Las condiciones de un Deny se combinan con AND: se deniega solo si el
   # acceso NO viene por el endpoint Y el principal NO está exceptuado.
-  vpce_condition   = { StringNotEquals = { "aws:SourceVpce" = var.allowed_vpce_id } }
+  vpce_condition = { StringNotEquals = { "aws:SourceVpce" = var.allowed_vpce_id } }
   exempt_condition = {
     for k, v in { ArnNotLike = { "aws:PrincipalArn" = var.vpce_exempt_principal_arns } } :
     k => v if length(var.vpce_exempt_principal_arns) > 0

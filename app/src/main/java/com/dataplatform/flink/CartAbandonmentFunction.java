@@ -65,8 +65,10 @@ public class CartAbandonmentFunction
 
         UserActivity result = new UserActivity();
         result.userId = userId;
-        result.windowStart = Instant.ofEpochMilli(context.window().getStart()).toString();
-        result.windowEnd = Instant.ofEpochMilli(context.window().getEnd()).toString();
+        result.windowStartMillis = context.window().getStart();
+        result.windowEndMillis = context.window().getEnd();
+        result.windowStart = Instant.ofEpochMilli(result.windowStartMillis).toString();
+        result.windowEnd = Instant.ofEpochMilli(result.windowEndMillis).toString();
         result.totalEvents = c.total;
         result.pageViews = c.pageViews;
         result.clicks = c.clicks;

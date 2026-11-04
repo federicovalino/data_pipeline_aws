@@ -1,7 +1,8 @@
 # ---------------------------------------------------------------------------
 # Módulo flink: aplicación de Amazon Managed Service for Apache Flink.
 #   S3 (artefacto .jar) ─► MSF (job stateful) ◄─ Kinesis Data Stream (pre-entrega 2)
-#                               └─► CloudWatch Logs (resultados, alertas, eventos tardíos)
+#                               ├─► CloudWatch Logs (resultados, alertas, eventos tardíos)
+#                               └─► Tabla Iceberg en el Lakehouse (pre-entrega 5)
 #   Checkpoints y snapshots: S3 administrado por el servicio.
 # ---------------------------------------------------------------------------
 
@@ -221,6 +222,14 @@ resource "aws_iam_role_policy" "flink" {
   policy = data.aws_iam_policy_document.flink.json
 }
 
+# Permisos del Lakehouse (Glue Data Catalog + S3 warehouse), definidos en el módulo lakehouse
+# count (y no for_each): el ARN se conoce recién en el apply, pero la cantidad sí se conoce en el plan
+resource "aws_iam_role_policy_attachment" "additional" {
+  count      = length(var.additional_policy_arns)
+  role       = aws_iam_role.flink.name
+  policy_arn = var.additional_policy_arns[count.index]
+}
+
 # ===========================================================================
 # 4. APLICACIÓN DE MANAGED SERVICE FOR APACHE FLINK
 # ===========================================================================
@@ -258,6 +267,9 @@ resource "aws_kinesisanalyticsv2_application" "this" {
           "watermark.idleness.seconds"         = tostring(var.watermark_idleness_seconds)
           "allowed.lateness.seconds"           = tostring(var.allowed_lateness_seconds)
           "kinesis.getrecords.interval.ms"     = tostring(var.getrecords_interval_ms)
+          "iceberg.warehouse"                  = var.iceberg_warehouse
+          "iceberg.database"                   = var.iceberg_database
+          "iceberg.table"                      = var.iceberg_table
         }
       }
     }
@@ -323,5 +335,5 @@ resource "aws_kinesisanalyticsv2_application" "this" {
   }
 
   # El rol necesita sus permisos antes de que la aplicación arranque
-  depends_on = [aws_iam_role_policy.flink]
+  depends_on = [aws_iam_role_policy.flink, aws_iam_role_policy_attachment.additional]
 }
