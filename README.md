@@ -513,6 +513,8 @@ creating or updating applications. Create a support case with the AWS Account Ve
 for further assistance.
 ```
 
+![Error de verificación de cuenta al crear la aplicación MSF con terraform apply](docs/flink-conflict-creation.png)
+
 Es una restricción que AWS aplica a cuentas nuevas para Managed Service for Apache Flink. Se abrió un caso de soporte para habilitar el servicio. Una vez habilitado, alcanza con repetir `terraform apply`: el resto de la infraestructura ya existe y Terraform solo crea la aplicación.
 
 #### Ejecución del mismo job en un clúster Flink 1.19 contra el Kinesis real
@@ -758,6 +760,8 @@ python scripts/producer.py --stream-name dataplatform-dev-stream --count 600 --u
 
 Esperar al menos 2 checkpoints (2 minutos) y verificar en Glue, S3 y Athena.
 
+> **Nota sobre MSF:** la cuenta sigue con la restricción de verificación descripta en la pre-entrega 4 (`UnsupportedOperationException … needs additional verification`, ver [captura](docs/flink-conflict-creation.png)). Por eso la evidencia de abajo se generó con el mismo `.jar` corriendo en el clúster Flink 1.19.1 local, contra el Kinesis, el Glue Data Catalog, el S3 y el Athena **reales** de AWS. El código y la infraestructura son los mismos: cuando AWS habilite el servicio, `terraform apply` crea la aplicación con las propiedades `iceberg.*` y la política `lakehouse-writer` ya adjunta.
+
 ### Evidencia
 
 #### 1. Tabla Iceberg registrada en el Glue Data Catalog
@@ -773,8 +777,33 @@ aws s3 ls "$env:ICEBERG_WAREHOUSE/lakehouse_db.db/user_activity/metadata/"
 ```
 
 ```
-TODO: pegar la salida (archivos *.metadata.json, snap-*.avro y *-m0.avro)
+2026-11-04 14:22:01    2681 00000-96d2ddb0-c561-4079-9108-5898a5feb5e2.metadata.json
+2026-11-04 14:23:50    4341 00001-05821f1f-2653-4738-9fa8-8a1ad667a738.metadata.json
+2026-11-04 14:24:50    5946 00002-c8afa934-2367-49ac-a9b3-8731013d0269.metadata.json
+2026-11-04 14:25:49    7470 00003-2d7d11ea-4980-45e6-b8c0-99b68358f9c9.metadata.json
+2026-11-04 14:26:49    8994 00004-f089b39b-5f83-41a1-b1d2-285c2ccf50af.metadata.json
+2026-11-04 14:27:49   10600 00005-ab3bf576-b19e-482f-aa5a-bfa1c4920562.metadata.json
+2026-11-04 14:28:49   12208 00006-307a0758-2c5e-4655-9e5a-742c023e0255.metadata.json
+2026-11-04 14:28:48    7808 5da6c0f1-a8d5-42a5-a632-a14541a878ad-m0.avro
+2026-11-04 14:28:48    7741 5da6c0f1-a8d5-42a5-a632-a14541a878ad-m1.avro
+...
+2026-11-04 14:23:50    4509 snap-1730212703600013605-1-cdf8f97c-5f79-43a5-afa0-dafd8bdbbe6a.avro
+2026-11-04 14:24:49    4592 snap-8446357772246081948-1-69f8ebb8-4a08-4819-bbe2-6f5bf2fb8334.avro
+2026-11-04 14:25:48    4647 snap-7734524313382199758-1-5fe2fe71-02a1-466d-b6e3-c70154f9b752.avro
+2026-11-04 14:26:49    4702 snap-6531474432029485937-1-61d21eef-8153-41a5-a129-f5f2862a871d.avro
+2026-11-04 14:27:49    4763 snap-8855986889323893130-1-ddf66a93-d229-4c28-ac98-31a0c53b5011.avro
+2026-11-04 14:28:49    4822 snap-9008163909663980986-1-5da6c0f1-a8d5-42a5-a632-a14541a878ad.avro
 ```
+
+*(hora local UTC-3; extracto)*
+
+**Lectura:**
+
+- **`00000-….metadata.json`:** la creación de la tabla (esquema, partition spec y propiedades, sin snapshots) que hizo `ensureTable` al arrancar el job.
+- **`00001` a `00006`:** un `metadata.json` nuevo **cada ~60 segundos**, es decir, un commit por cada checkpoint de Flink. Cada uno referencia todos los snapshots anteriores, por eso crece (de 4 KB a 12 KB).
+- **`snap-….avro` (manifest lists):** uno por snapshot, con el mismo timestamp que su `metadata.json`.
+- **`…-m0.avro` y `…-m1.avro` (manifests):** dos por commit, que listan los archivos que agrega cada snapshot. Con upsert (Iceberg v2), un commit registra los archivos de datos y los *delete files* que reemplazan las versiones anteriores de las ventanas re-emitidas por `allowedLateness`.
+- La jerarquía completa del formato Iceberg (catálogo → metadata JSON → manifest list → manifests → Parquet) queda verificada en S3, y en Glue la tabla apunta a la ubicación `warehouse/lakehouse_db.db/user_activity`.
 
 #### 3. Consulta en Athena: los datos reflejan las transformaciones de Flink
 
@@ -784,14 +813,29 @@ Athena → workgroup `dataplatform-dev-lakehouse` → base `lakehouse_db`:
 SELECT user_id, window_start, window_end, total_events, add_to_cart, checkouts,
        pending_cart_items, abandonment_risk, alert_triggered
 FROM lakehouse_db.user_activity
-WHERE window_start >= CAST(current_timestamp AS timestamp) - interval '1' hour   -- partition pruning por day(window_start)
+WHERE window_start >= TIMESTAMP '2026-11-04 00:00:00'   -- partition pruning por day(window_start)
 ORDER BY window_start DESC, pending_cart_items DESC
 LIMIT 20;
 ```
 
 ```
-TODO: pegar el resultado
+user_id    window_start             window_end               total_events add_to_cart checkouts pending_cart_items abandonment_risk alert_triggered
+user-0001  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  7            3           0         3                  true             true
+user-0011  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  2            0           0         2                  false            false
+user-0003  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  1            1           0         2                  false            false
+user-0007  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  5            1           0         1                  false            false
+user-0000  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  5            3           1         0                  false            false
+user-0006  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  8            1           2         0                  false            false
+user-0018  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  6            2           3         0                  false            false
+...        (20 filas, una por usuario, ventana 17:27–17:28 UTC)
 ```
+
+**Lectura:**
+
+- Cada fila es el resultado de una **ventana tumbling de 1 minuto por usuario** calculada por Flink (`window_start`/`window_end` alineados al minuto, en UTC).
+- `pending_cart_items` sale del **Keyed State** del `CartAbandonmentFunction`: es acumulado entre ventanas, por eso puede ser mayor que `add_to_cart` de la ventana (ej. `user-0011`: 0 agregados en este minuto, 2 pendientes de minutos anteriores) o quedar en 0 cuando hubo checkouts (`user-0000`, `user-0006`, `user-0018`).
+- `user-0001` llegó a 3 ítems pendientes sin checkout: Flink marcó `abandonment_risk = true` y disparó la alerta (`alert_triggered = true`). La regla de negocio del job queda visible directamente en SQL sobre el Lakehouse.
+- Gracias al upsert por `(user_id, window_start)`, las ventanas re-emitidas por `allowedLateness` no se duplican: hay **una sola fila por usuario y ventana**.
 
 ![Consulta en Athena sobre la tabla Iceberg](docs/athena-iceberg-query.png)
 
@@ -809,8 +853,25 @@ FOR TIMESTAMP AS OF (current_timestamp - interval '5' minute);
 ```
 
 ```
-TODO: pegar el resultado de $snapshots
+committed_at                 snapshot_id          operation  added_records
+2026-11-04 17:28:47.935 UTC  9008163909663980986  overwrite  22
+2026-11-04 17:27:47.948 UTC  8855986889323893130  overwrite  21
+2026-11-04 17:26:48.039 UTC  6531474432029485937  overwrite  20
+2026-11-04 17:25:47.900 UTC  7734524313382199758  overwrite  19
+2026-11-04 17:24:48.717 UTC  8446357772246081948  overwrite  21
+2026-11-04 17:23:48.961 UTC  1730212703600013605  overwrite  21
 ```
+
+*(Tiempo de ejecución 652 ms, 6.61 KB escaneados)*
+
+![Snapshots de la tabla Iceberg en Athena](docs/athena-iceberg-snapshots.png)
+
+**Lectura:**
+
+- **6 snapshots, uno cada ~60 s:** coinciden con el intervalo de checkpoint de Flink (el `IcebergSink` commitea al completar cada checkpoint) y con los `metadata.json` `00001`–`00006` de S3 (14:23:50 → 14:28:49 en hora local = 17:23:48 → 17:28:47 UTC).
+- **Los `snapshot_id` son los mismos que nombran los `snap-<id>-….avro`** del listado de S3: la manifest list de cada snapshot.
+- **`operation = overwrite`** (no `append`): con `upsert(true)` y `equalityFieldColumns(user_id, window_start)` cada commit escribe filas nuevas **y** *equality deletes* que invalidan la versión anterior de esa clave. Es Iceberg v2 en modo merge-on-read.
+- **`added_records` ≈ 20 por commit:** una fila por cada uno de los 20 usuarios simulados por ventana, más las re-emisiones por eventos tardíos.
 
 Cada fila de `$snapshots` es un checkpoint de Flink que commiteó, con commits cada ~60 s y sin errores de concurrencia.
 
