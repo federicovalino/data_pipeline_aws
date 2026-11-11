@@ -81,3 +81,18 @@ output "athena_workgroup" {
   description = "Workgroup de Athena para consultar las tablas Iceberg."
   value       = module.lakehouse.athena_workgroup
 }
+
+output "redshift_workgroup" {
+  description = "Workgroup de Redshift Serverless."
+  value       = module.redshift.workgroup_name
+}
+
+output "redshift_database" {
+  description = "Base de datos de Redshift."
+  value       = module.redshift.database_name
+}
+
+output "redshift_iam_role_arn" {
+  description = "Rol IAM para los CREATE EXTERNAL SCHEMA del script SQL."
+  value       = module.redshift.iam_role_arn
+}

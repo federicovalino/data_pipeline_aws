@@ -97,3 +97,25 @@ module "flink" {
   # (aws kinesisanalyticsv2 start-application) una vez verificada la infraestructura.
   start_application = false
 }
+
+module "redshift" {
+  source = "../../modules/redshift"
+
+  name_prefix = local.name_prefix
+
+  # Red privada de la pre-entrega 1: el workgroup no es público
+  vpc_id     = module.network.vpc_id
+  vpc_cidr   = var.vpc_cidr
+  subnet_ids = module.network.private_subnet_ids
+
+  # Fuente: el mismo stream de las pre-entregas 2 y 4
+  stream_arn         = module.kinesis.stream_arn
+  stream_kms_key_arn = module.kinesis.kms_key_arn
+
+  # Lakehouse de la pre-entrega 5 (Iceberg en S3 + Glue)
+  lakehouse_bucket_name = module.lakehouse.bucket_name
+  glue_database_name    = module.lakehouse.database_name
+
+  base_capacity_rpu     = 8
+  daily_rpu_hours_limit = 16
+}
