@@ -8,6 +8,7 @@ Plataforma de datos en AWS gestionada 100% con Terraform. Se construye por etapa
 | Pre-entrega 2 | Ingesta real-time: Kinesis Data Stream (provisioned, KMS), Firehose hacia la capa Bronze del Data Lake, producer simulado y alarmas | [Ingesta real-time](#pre-entrega-2--ingesta-real-time-sobre-el-entorno-base) |
 | Pre-entrega 4 | Procesamiento en tiempo real: aplicación de Managed Service for Apache Flink con Event Time, watermarks, ventanas de 1 minuto, Keyed State y checkpointing, desplegada con Terraform | [Procesamiento en tiempo real](#pre-entrega-4--procesamiento-en-tiempo-real-con-managed-service-for-apache-flink) |
 | Pre-entrega 5 | Lakehouse: tabla Apache Iceberg escrita por Flink (IcebergSink), registrada en el Glue Data Catalog (`lakehouse_db`) y consultable con Athena, todo declarado en Terraform | [Lakehouse con Iceberg](#pre-entrega-5--pipeline-lakehouse-con-apache-iceberg-y-aws-glue-data-catalog) |
+| Pre-entrega 6 | Analítica in-stream: Redshift Serverless con Streaming Ingestion desde Kinesis (vistas materializadas), external schema sobre el Glue Data Catalog para consultar Iceberg y JOIN stream + histórico, con rol IAM de mínimo privilegio y RBAC | [Analítica con Redshift](#pre-entrega-6--analítica-in-stream-con-amazon-redshift-streaming-ingestion) |
 
 ## Arquitectura
 
@@ -59,7 +60,8 @@ network.vpc_id, private_subnet_ids, identity.*_role_arn ──► outputs del en
 │   │   ├── identity/              # Rol de ejecución y rol de auditoría
 │   │   ├── kinesis/               # Pre-entrega 2: Kinesis Data Stream + Firehose → S3, IAM y alarmas
 │   │   ├── flink/                 # Pre-entrega 4: aplicación de Managed Service for Apache Flink, artefacto, IAM y logs
-│   │   └── lakehouse/             # Pre-entrega 5: bucket del Lakehouse, Glue Data Catalog (lakehouse_db), Athena e IAM
+│   │   ├── lakehouse/             # Pre-entrega 5: bucket del Lakehouse, Glue Data Catalog (lakehouse_db), Athena e IAM
+│   │   └── redshift/              # Pre-entrega 6: Redshift Serverless, rol IAM de streaming, VPC endpoint de Kinesis
 │   └── environments/
 │       └── dev/                   # Root module 2: invoca los módulos con los valores de dev
 │           ├── backend.tf         # backend "s3" {} (configuración parcial)
@@ -70,6 +72,7 @@ network.vpc_id, private_subnet_ids, identity.*_role_arn ──► outputs del en
 │           ├── outputs.tf
 │           └── backend.hcl.example
 ├── app/                           # Aplicación Flink (Java 11, Maven): pre-entregas 4 y 5
+├── sql/redshift/                  # Pre-entrega 6: script SQL de Streaming Ingestion, MVs, Lakehouse y seguridad
 ├── scripts/                       # producer simulado (Python/Boto3) y evento de prueba para la CLI
 ├── docs/                          # capturas de verificación
 ├── PLAN_OUTPUT.md
@@ -825,15 +828,27 @@ user-0011  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  2            0     
 user-0003  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  1            1           0         2                  false            false
 user-0007  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  5            1           0         1                  false            false
 user-0000  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  5            3           1         0                  false            false
-user-0006  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  8            1           2         0                  false            false
+user-0019  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  5            3           1         0                  false            false
+user-0015  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  6            2           2         0                  false            false
+user-0005  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  4            0           1         0                  false            false
+user-0002  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  4            0           1         0                  false            false
 user-0018  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  6            2           3         0                  false            false
-...        (20 filas, una por usuario, ventana 17:27–17:28 UTC)
+user-0012  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  2            0           0         0                  false            false
+user-0017  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  2            0           2         0                  false            false
+user-0008  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  5            0           2         0                  false            false
+user-0010  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  1            0           0         0                  false            false
+user-0009  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  3            1           1         0                  false            false
+user-0006  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  8            1           2         0                  false            false
+user-0016  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  3            2           1         0                  false            false
+user-0004  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  7            2           1         0                  false            false
+user-0014  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  7            1           1         0                  false            false
+user-0013  2026-11-04 17:27:00.000  2026-11-04 17:28:00.000  6            1           3         0                  false            false
 ```
 
 **Lectura:**
 
 - Cada fila es el resultado de una **ventana tumbling de 1 minuto por usuario** calculada por Flink (`window_start`/`window_end` alineados al minuto, en UTC).
-- `pending_cart_items` sale del **Keyed State** del `CartAbandonmentFunction`: es acumulado entre ventanas, por eso puede ser mayor que `add_to_cart` de la ventana (ej. `user-0011`: 0 agregados en este minuto, 2 pendientes de minutos anteriores) o quedar en 0 cuando hubo checkouts (`user-0000`, `user-0006`, `user-0018`).
+- `pending_cart_items` sale del **Keyed State** del `CartAbandonmentFunction`: es acumulado entre ventanas, por eso puede ser mayor que `add_to_cart` de la ventana (ej. `user-0011`: 0 agregados en este minuto, 2 pendientes de minutos anteriores) o quedar en 0 cuando hubo checkouts (`user-0000`, `user-0015`, `user-0018`).
 - `user-0001` llegó a 3 ítems pendientes sin checkout: Flink marcó `abandonment_risk = true` y disparó la alerta (`alert_triggered = true`). La regla de negocio del job queda visible directamente en SQL sobre el Lakehouse.
 - Gracias al upsert por `(user_id, window_start)`, las ventanas re-emitidas por `allowedLateness` no se duplican: hay **una sola fila por usuario y ventana**.
 
@@ -878,6 +893,112 @@ Cada fila de `$snapshots` es un checkpoint de Flink que commiteó, con commits c
 ### Costos y limpieza
 
 El bucket del Lakehouse y el workgroup de Athena tienen `force_destroy`, así que `terraform destroy` los elimina aunque contengan datos y versiones. Athena cobra por datos escaneados: con el particionado por día y el volumen de esta prueba, son centavos.
+
+## Pre-entrega 6 — Analítica in-stream con Amazon Redshift (Streaming Ingestion)
+
+Se agrega una capa de **consulta analítica de baja latencia**: Redshift Serverless consume el Kinesis Data Stream **directamente** (Redshift Streaming Ingestion, sin staging en S3) y, en la misma sesión SQL, lee la tabla **Iceberg** del Lakehouse a través del Glue Data Catalog.
+
+![Arquitectura actualizada con Redshift](docs/arquitectura-pe6.png)
+
+```
+                       ┌──► Firehose ──► S3 Data Lake (raw)                    [PE2]
+Productor ──► Kinesis ─┼──► Flink ──► Iceberg (S3 + Glue) ──► Athena            [PE4-5]
+ (clickstream) (KMS)   └──► Redshift Streaming Ingestion                        [PE6]
+                              stream_staging.mv_clickstream_events (AUTO REFRESH)
+                                   └──► analytics.mv_* (agregaciones por minuto)
+                                                 │ JOIN (misma sesión SQL)
+                              lakehouse.user_activity ◄── external schema (Glue / Iceberg)
+```
+
+### Infraestructura (`infra/modules/redshift/`)
+
+| Recurso | Configuración | Por qué |
+|---|---|---|
+| `aws_redshiftserverless_namespace` | base `analytics`, admin `rs_admin` con **contraseña gestionada por Secrets Manager**, logs de usuario/conexión/actividad | Sin secretos en el código ni en el tfstate |
+| `aws_redshiftserverless_workgroup` | 8 RPU base, subredes **privadas** de la PE1 (2 AZ), `publicly_accessible = false`, `require_ssl = true` | Sin exposición a Internet y TLS obligatorio para clientes SQL |
+| `aws_vpc_endpoint` (Interface, `kinesis-streams`) | DNS privado, en las subredes privadas, SG que solo admite 443 desde Redshift | La VPC no tiene NAT ni IGW: la ingesta viaja por PrivateLink, nunca por Internet |
+| `aws_iam_role` `…-redshift-streaming-role` | Trust: `redshift.amazonaws.com` y `redshift-serverless.amazonaws.com`. Permisos: `kinesis:DescribeStream`, `DescribeStreamSummary`, `GetShardIterator`, `GetRecords`, `ListShards` **sobre un único stream**; `kms:Decrypt` sobre **su** CMK (condición `kms:ViaService`); Glue de solo lectura sobre `lakehouse_db`; S3 `GetObject` solo en `warehouse/*` | Mínimo privilegio, sin comodines en acciones; nada de `AmazonKinesisReadOnlyAccess` ni `s3:*` |
+| `aws_redshiftserverless_usage_limit` | 16 RPU-horas por día → `deactivate` | Tope de costo si algo queda corriendo |
+
+El rol queda como **rol IAM por defecto** del namespace, así que el SQL usa `IAM_ROLE default`: autenticación IAM entre servicios sin ARNs ni credenciales en el script.
+
+### Modelo de datos en Redshift (`sql/redshift/pre-entrega-6.sql`)
+
+| Esquema | Objeto | Acceso |
+|---|---|---|
+| `kds_ingest` (externo, `FROM KINESIS`) | el stream como objeto de Redshift | solo administrador |
+| `stream_staging` | `mv_clickstream_events`: MV de streaming, `AUTO REFRESH YES`, parseo JSON de `event_id`, `user_id`, `event_type`, `page`, `event_ts` + metadatos de Kinesis | solo administrador (datos crudos) |
+| `analytics` | `mv_events_per_minute`, `mv_user_activity_rt` (mismo grano que la tabla Iceberg), `v_hot_users_with_history` (JOIN stream + Iceberg) | rol `analytics_reader` |
+| `lakehouse` (externo, `FROM DATA CATALOG`) | `user_activity` (Iceberg) | rol `analytics_reader` (lectura) |
+
+Decisiones:
+
+- **MV de streaming con lógica mínima:** solo extrae texto con `json_extract_path_text(..., true)` y filtra con `CAN_JSON_PARSE`. Un error de casteo dentro de una MV de streaming bloquea la ingesta; los casteos (timestamp del evento) se hacen en la capa `analytics`. Es la protección contra *schema drift*.
+- **Refresco en dos niveles:** la MV de streaming se refresca sola y en forma incremental (solo lee desde el último sequence number de cada shard). Las agregaciones se refrescan cada 60 s (trade-off latencia/cómputo). `mv_user_activity_rt` se recalcula completa porque el cast de texto a `TIMESTAMP` no es incrementalmente mantenible; se acepta para no castear dentro de la MV de streaming.
+- **Resultados:** lag de ingesta de 0-2 s para tráfico nuevo; la reconciliación Redshift (stream) vs. Flink (Iceberg) por usuario y minuto da `diff = 0`.
+- **Iceberg y equality deletes:** Flink escribe en modo upsert (delete files de igualdad). Antes de leer el histórico desde Redshift se compacta la tabla con `OPTIMIZE … REWRITE DATA USING BIN_PACK` en Athena, que aplica los deletes y deja archivos Parquet limpios.
+
+### Despliegue y prueba
+
+```powershell
+# 1. Infraestructura (incluye Redshift). La creación de la app MSF sigue
+#    rechazada por la verificación de cuenta (ver PE4): el resto se crea igual.
+cd infra/environments/dev; terraform apply; cd ../../..
+
+# 2. Histórico en Iceberg: el job de Flink local (PE5) unos minutos
+docker compose -f app/local/docker-compose.yml up -d
+docker compose -f app/local/docker-compose.yml exec jobmanager flink run -d -p 2 /job/clickstream-processor-1.0.jar
+python scripts/producer.py --stream-name dataplatform-dev-stream --count 600 --users 20 --interval 0.5
+#    esperar ~2 min (2 checkpoints) para que Flink commitee el último snapshot
+docker compose -f app/local/docker-compose.yml down
+#    Athena: OPTIMIZE lakehouse_db.user_activity REWRITE DATA USING BIN_PACK;
+
+# 3. Redshift: Query Editor v2 → workgroup dataplatform-dev-analytics → base analytics
+#    → ejecutar sql/redshift/pre-entrega-6.sql por secciones
+
+# 4. Datos calientes: nuevo tráfico mientras se consulta
+python scripts/producer.py --stream-name dataplatform-dev-stream --count 300 --users 20 --interval 0.5
+```
+
+### Evidencia
+
+**1. Streaming Ingestion:** eventos de Kinesis en `stream_staging.mv_clickstream_events`, con los campos JSON ya convertidos en columnas y los metadatos de Kinesis.
+
+![MV de streaming](docs/rs-01-streaming-mv.png)
+
+**2. Agregación de tiempo real:** `analytics.mv_events_per_minute`.
+
+![Eventos por minuto](docs/rs-02-events-per-minute.png)
+
+**3. Iceberg leído desde Redshift:** `lakehouse.user_activity` a través del external schema sobre Glue.
+
+![Iceberg desde Redshift](docs/rs-03-iceberg.png)
+
+**4. JOIN stream + histórico en la misma sesión:** `retarget_now = true` marca a los usuarios con el carrito abierto ahora y con alertas de abandono en el histórico.
+
+![JOIN caliente + histórico](docs/rs-04-join.png)
+
+**5. Reconciliación:** el conteo de Redshift (stream) y el de Flink (Iceberg) por usuario y minuto coinciden: `diff = 0`.
+
+![Reconciliación](docs/rs-05-reconciliacion.png)
+
+**6. RBAC:** `analista_demo` (rol `analytics_reader`) consulta `analytics`, pero recibe `permission denied for schema stream_staging`.
+
+![Permisos](docs/rs-06-permisos.png)
+
+**7. Lag de ingesta:** el tráfico nuevo está disponible en 0-2 s. Los minutos anteriores a la creación de la MV muestran la carga inicial desde la retención del stream.
+
+![Lag de ingesta](docs/rs-07-lag.png)
+
+**8. Metadatos de Iceberg en S3:** un `metadata.json` por commit de Flink, más manifest lists y manifests.
+
+![Metadata Iceberg](docs/rs-08-iceberg-metadata.png)
+
+El documento completo de la entrega es `CheckPoint_Redshift_Valino_Federico.pdf` (diagrama, script SQL y capturas).
+
+### Costos y limpieza
+
+Redshift Serverless cobra por RPU-hora solo mientras procesa (con mínimo de 60 s por consulta); el refresco automático de la MV de streaming consume cómputo mientras entra tráfico. El límite diario de 16 RPU-horas acota el peor caso. El endpoint de interfaz de Kinesis cobra por hora y por AZ. Al terminar: `terraform destroy`.
 
 ## Cómo extender a prod
 
